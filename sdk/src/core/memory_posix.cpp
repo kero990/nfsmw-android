@@ -491,6 +491,13 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, siz
     shm_unlink(full_path.c_str());
     return kFileMappingHandleInvalid;
   }
+  // Detach the name right away. POSIX keeps the inode alive while `ret` is open, so the mapping keeps
+  // working and the backing file frees itself as soon as the fd closes -- including when the process
+  // dies by SIGBUS or SIGKILL, where the owner's destructor never runs. Otherwise every crash leaks one
+  // file in /dev/shm (tmpfs, backed by RAM) and, since the name embeds a tick count and is never reused,
+  // the leftovers pile up until the next run fails to commit the mapping. CloseFileMappingHandle still
+  // unlinks; the second call just returns ENOENT.
+  shm_unlink(full_path.c_str());
   return static_cast<FileMappingHandle>(ret);
 #endif
 }

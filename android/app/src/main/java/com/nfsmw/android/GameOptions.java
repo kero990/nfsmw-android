@@ -74,12 +74,21 @@ final class GameOptions {
             new Option("sky", "Resplandor del cielo", "nfsmw_resplandor_cielo", "natural",
                     new String[] {"original", "natural", "suave"},
                     new String[] {"Original (Xbox 360)", "Natural", "Suave"}),
-            // The PAL discs carry the text of these ten languages (app/src/nfsmw_idioma.cpp). Speech and movies
-            // stay in the disc's language.
-            new Option("language", "Idioma de los textos", "nfsmw_idioma", "-1",
-                    new String[] {"-1", "4", "0", "1", "2", "3", "5", "6", "7", "12", "13"},
-                    new String[] {"El de la edición", "Español", "English", "Français", "Deutsch", "Italiano",
-                            "Nederlands", "Svenska", "Dansk", "Polski", "Suomi"}),
+            // Every language of the edition's table (app_cht/src/nfsmw_idioma.cpp): this APK is built from the
+            // Asia executable, whose table has thirteen entries (ids 8 Korean, 9 Chinese and 10 Japanese on top
+            // of the PAL ten). Only the languages whose file is actually on the disc have text: an id the disc
+            // does not carry falls back to the edition's with a log line. Speech and movies stay in the disc's
+            // language.
+            //
+            // The default is 9, not -1: at startup this build chooses the text language with
+            // XGetLanguage() == kTChinese ? 9 : 0 (app_cht/generated/default/nfsmw_recomp.22.cpp), and the SDK
+            // always answers kEnglish, because sdk/src/kernel/xam/xam_info.cpp hardcodes game_region to NTSCU.
+            // So -1 would come out as English on every device instead of this edition's Chinese.
+            new Option("language", "Idioma de los textos", "nfsmw_idioma", "9",
+                    new String[] {"9", "4", "0", "1", "2", "3", "5", "6", "7", "12", "13", "-1"},
+                    new String[] {"繁體中文", "Español", "English", "Français", "Deutsch", "Italiano",
+                            "Nederlands", "Svenska", "Dansk", "Polski", "Suomi",
+                            "El del juego (aquí, English)"}),
             new Option("volume", "Volumen del juego", "audio_ganancia_pct", "100",
                     new String[] {"100", "125", "150", "200"},
                     new String[] {"Normal", "Alto", "Muy alto", "Máximo · puede saturar"}),

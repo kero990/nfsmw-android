@@ -1,22 +1,29 @@
 // nfsmw - language of the game's text
 //
-// The PAL discs carry the text of ten languages in NFS/ZZDATA (LANGUAGES\ENGLISH.BIN ... POLISH.BIN, checked
-// in the ZDIR.BIN of the PAL Spanish disc: all ten names are in its hash index). What makes an edition Spanish,
-// French, German or Italian is the executable: at startup sub_823B48A0 calls SetCurrentLanguage with a
-// constant (li r3,4 in the Spanish one); the French, German and Italian builds differ in those constants
-// (docs/editions.md). Movies and speech stay in the disc's language; the text, menus and their textures
+// The disc carries the text of every language of its table in NFS/ZZDATA (LANGUAGES\ENGLISH.BIN ...
+// POLISH.BIN: on the PAL Spanish disc all ten names are in the hash index of its ZDIR.BIN). What makes an
+// edition Spanish, French, German or Asian is the executable: at startup sub_823B48A0 calls
+// SetCurrentLanguage with a constant (li r3,4 in the Spanish one); the French, German and Italian builds
+// differ in those constants and the Asia build carries a longer language table (docs/editions.md). Movies
+// and speech stay in the disc's language; the text, menus and their textures
 // (LANGUAGES\LANGUAGETEXTURES.BIN) follow the current language.
 //
-// The table the game uses, 0x828FF000, 20 bytes per language, ten entries:
+// The table the game uses, 0x828FF000, 20 bytes per language, ten entries on PAL and thirteen on Asia:
 //   +0 id, +4 name ("SPANISH"), +8 file ("LANGUAGES\SPANISH.BIN"), +12 and +16 per-language data.
 //   ids: 0 English, 1 French, 2 German, 3 Italian, 4 Spanish, 5 Dutch, 6 Swedish, 7 Danish, 12 Polish,
-//   13 Finnish.
+//   13 Finnish; the Asia table adds 8 Korean, 9 Chinese and 10 Japanese.
 // The current language is the word at 0x828FF0C8 (-1 until set). Its only writer is SetCurrentLanguage,
 // sub_822BCBD0(r3 = id), called once at startup and by the game's own next/previous language function
 // (sub_822BC640), which skips any language whose file is missing through sub_823BCBC8(r3 = file name).
 //
 // With nfsmw_idioma >= 0 the first SetCurrentLanguage (the startup one) gets that id instead, if its file is
 // on the disc; otherwise the edition's language stays and a warning is logged.
+//
+// -1 means "leave the edition's choice alone", and what that choice is depends on the platform: the game
+// asks XGetLanguage() for the console language, and the SDK answers a hardcoded kEnglish because it never
+// moves game_region off XEX_REGION_NTSCU (sdk/src/kernel/xam/xam_info.cpp). On the Asia build, whose startup
+// is "XGetLanguage() == kTChinese ? 9 : 0", that makes -1 come out as English on PC and Android even though
+// the edition is Chinese. Pick the id explicitly for text in another language.
 #include <atomic>
 #include <cstdint>
 #include <cstring>
@@ -27,8 +34,9 @@
 
 REXCVAR_DEFINE_INT32(nfsmw_idioma, -1, "NFSMW",
                      "Idioma de los textos del juego: -1 = el de la edicion; 0 ingles, 1 frances, 2 aleman, "
-                     "3 italiano, 4 espanol, 5 neerlandes, 6 sueco, 7 danes, 12 polaco, 13 fines. Las voces y los "
-                     "videos siguen en el idioma del disco")
+                     "3 italiano, 4 espanol, 5 neerlandes, 6 sueco, 7 danes, 12 polaco, 13 fines; las "
+                     "ediciones asiaticas anaden 8 coreano, 9 chino y 10 japones. Solo los idiomas que trae "
+                     "tu disco tienen texto; las voces y los videos siguen en el idioma del disco")
     .range(-1, 13)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
@@ -37,8 +45,14 @@ namespace {
 
 constexpr uint32_t kTabla = 0x828FF000;
 constexpr uint32_t kEntrada = 20;
-constexpr uint32_t kEntradas = 10;
 constexpr uint32_t kActual = 0x828FF0C8;
+// kActual is the word right after the table, so the span between the two is the table's own size and gives
+// the entry count without a second number to keep in sync. This is what tools/editions/crear_arbol.py
+// translates when it makes another edition's tree: it rewrites kTabla and kActual but has no count to
+// rewrite, so a literal here would be copied as-is. The PAL table has 10 entries (0xC8 = 10 * 20); the Asia
+// executable's has 13 (0x104, ids 8 Korean, 9 Chinese and 10 Japanese on top), and with a literal 10 the
+// loop stopped before kActual and every id from 8 up fell back to the edition's language.
+constexpr uint32_t kEntradas = (kActual - kTabla) / kEntrada;
 
 uint32_t Leer32(const uint8_t* base, uint32_t dir) {
   uint32_t v = 0;
@@ -64,7 +78,7 @@ REX_HOOK_RAW(sub_822BCBD0) {
     return;
   }
   const uint32_t de_la_edicion = ctx.r3.u32;
-  // The table must be the one described above: ten entries whose +8 points at "LANGUAGES\...".
+  // The table must be the one described above: entries whose +8 points at "LANGUAGES\...".
   uint32_t fichero = 0;
   bool tabla_ok = true;
   for (uint32_t i = 0; i < kEntradas; ++i) {

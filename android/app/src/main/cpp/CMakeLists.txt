@@ -21,7 +21,11 @@ set(REXGLUE_RECOMP_DEBUG_INFO "none" CACHE STRING "Omit debug tables for the lar
 set(SDL_SHARED ON CACHE BOOL "SDL shared library loaded by SDLActivity" FORCE)
 set(SDL_STATIC OFF CACHE BOOL "Use SDL's shared Android library" FORCE)
 
-add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../../../../../app" "nfsmw-app")
+# The edition this APK embeds: app_cht is the Asia (traditional Chinese) tree that tools/editions/crear_arbol.py
+# builds from app/ by translating every 82xxxxxx address with the PAL -> Asia map. One APK carries one edition:
+# the recompiled code, GameEdition.SUPPORTED_SHA256 and assets/shaders/release/manifest.json all belong to the
+# same default.xex, and an APK built against app/ only accepts the PAL Spanish disc.
+add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../../../../../app_cht" "nfsmw-app")
 target_sources(nfsmw PRIVATE "${CMAKE_CURRENT_LIST_DIR}/android_touch.cpp"
                              "${CMAKE_CURRENT_LIST_DIR}/android_rendimiento.cpp")
 

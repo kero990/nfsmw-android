@@ -15,14 +15,15 @@ import java.security.MessageDigest;
 /**
  * Which edition of the game default.xex is.
  *
- * The recompiled code inside the APK comes from the PAL Spanish executable. Another edition starts at a
- * different entry point (0x8262E768 or 0x8262E9A8 instead of 0x8262E960) and the game closes at once with
- * "No function registered at ..." (app/overrides.toml). The launcher checks the SHA-256 of default.xex
+ * The recompiled code inside the APK comes from the Asia (traditional Chinese) executable, built as app_cht by
+ * tools/editions/crear_arbol.py. Another edition starts at a different entry point (0x8262E768 or 0x8262E960
+ * instead of this build's 0x8262ECF8, read from the XEX header) and the game closes at once with
+ * "No function registered at ..." (app_cht/overrides.toml). The launcher checks the SHA-256 of default.xex
  * against the installer's manifest (assets/shaders/release/manifest.json) and explains it before starting.
  */
 final class GameEdition {
-    static final String SUPPORTED_SHA256 = "aad15fc218d034de3131f746e0b763dd8049a40dd676efc87667fcaf4fc72694";
-    static final String SUPPORTED_NAME = "PAL (España)";
+    static final String SUPPORTED_SHA256 = "0cd7b9fa3957de085e298c91faa726116ad0079abaefead82c2f3337ee432e64";
+    static final String SUPPORTED_NAME = "Asia (Chino tradicional)";
     private static final String PREFS = "nfsmw_edition";
 
     final String sha256;

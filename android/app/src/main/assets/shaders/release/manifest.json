@@ -120,6 +120,15 @@
       "library_sha256": "07734624578e71ca62ae48692bc0a4e522373c73a79578a1c9530d3d4057c0ff",
       "library_size": 2883744,
       "blur_container_sha256": "9fff34a4ef2514a3d3e512f5f2342061090274af965bc0215e708e2e5736fc8f"
+    },
+    {
+      "edition": "Asia (Chino tradicional)",
+      "xex_sha256": "0cd7b9fa3957de085e298c91faa726116ad0079abaefead82c2f3337ee432e64",
+      "disc": {
+        "NFS/ZZDATA0.BIN": 384745472
+      },
+      "nro": "nfsmw-nx-cht.nro",
+      "blur_container_sha256": "e80cca037bd4becd8a192daa4583e3a3a9281e06436015746583f30701a296f9"
     }
   ]
 }

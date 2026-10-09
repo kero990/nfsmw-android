@@ -72,7 +72,7 @@ def main():
                     symlink_paths.add(
                         os.path.normpath(os.path.join(prefix, path.decode('utf-8')))
                     )
-        copied = kept = 0
+        copied = kept = skipped = 0
         for dirpath, dirnames, filenames in os.walk(source):
             dirnames[:] = [d for d in dirnames if d != '.git']
             for name in filenames:
@@ -88,9 +88,14 @@ def main():
                         link_target = link_file.read().strip()
                     resolved_target = os.path.normpath(os.path.join(dirpath, link_target))
                     if not os.path.isfile(resolved_target):
-                        raise FileNotFoundError(
-                            f'Could not resolve vendored symlink {relative_path}: {link_target}'
-                        )
+                        # Upstream carries symlinks that point at folders it does not ship (MoltenVK's
+                        # Demos/Cube/include/{cube,volk}). They are demo-only and never built, so they
+                        # are skipped instead of aborting the whole fetch.
+                        skipped += 1
+                        continue
+                if os.path.islink(src) and not os.path.exists(src):
+                    skipped += 1
+                    continue
                 if os.path.exists(dst) and resolved_target is None:
                     kept += 1
                     continue
@@ -104,7 +109,8 @@ def main():
                 else:
                     shutil.copy2(src, dst)
                     copied += 1
-        print(f'{copied} files copied into sdk/thirdparty, {kept} files of this port kept')
+        print(f'{copied} files copied into sdk/thirdparty, {kept} files of this port kept'
+              + (f', {skipped} dangling symlinks skipped' if skipped else ''))
     finally:
         if sys.version_info >= (3, 12):
             shutil.rmtree(work, onexc=remove_readonly)

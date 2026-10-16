@@ -37,6 +37,7 @@
 #include "nfsmw_texturas_bc.h"
 #include "nfsmw_nativo_sincronizacion.h"
 #include "nfsmw_spirv_vulkan11.h"
+#include "nfsmw_spirv_descriptores.h"
 
 #include "nfsmw_ajustes_graficos.h"
 #if __has_include("nfsmw_nativo_resplandor_energia_spirv.h") && __has_include("nfsmw_nativo_resplandor_suave_spirv.h")
@@ -374,6 +375,11 @@ REXCVAR_DEFINE_BOOL(nfsmw_nativo_cache_texturas_entre_fotogramas, true, "NFSMW",
 // Uploads the game's mip levels. With only the base level of each texture, distant surfaces looked grainy
 // compared with the Xbox 360. This also fixes the base level of small textures with packed mips, which
 // does not start at the base address.
+// Four-set packing adapted from victorgbd/NFSMW-Recompiled-Mobile, 3d9358e (GPL-3.0).
+REXCVAR_DEFINE_BOOL(nfsmw_nativo_cuatro_conjuntos, false, "NFSMW",
+                    "Forzar cuatro conjuntos de descriptores para comprobar compatibilidad Vulkan")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
 REXCVAR_DEFINE_BOOL(nfsmw_nativo_texturas_bc_cpu, false, "NFSMW",
                     "Forzar conversion BC1-5 en CPU para probar la ruta de GPU sin texturas BC")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
@@ -1156,7 +1162,14 @@ constexpr size_t kMaxRegistrosLista = 4096;
 // (68) and function (69), NDC (64-73) and g_InputRemap for the 16 locations (74-89).
 // 90 words up to g_InputRemap (bytes 296..359) and 32 more for 1/size of the 16 texture slots (bytes
 // 360..487), which avoid querying the texture size on every sample.
+#if defined(NFSC_RECOMP)
+// NFS Carbon: 6 more words (bytes 488..511) for g_InputRemap of locations 16-21 (its extra positions and TEXCOORD8;
+// its shader_common.h reads them there).
+constexpr uint32_t kPalabrasCompartidas = 128;
+constexpr uint32_t kPalabraRemapeosAltos = 122;
+#else
 constexpr uint32_t kPalabrasCompartidas = 122;
+#endif
 constexpr uint32_t kPalabraInvTamano = 90;
 // Constants through a dynamic UBO (nfsmw_nativo_constantes_ubo). The bit is SPEC_CONSTANT_CONSTANTES_UBO
 // from shader_common.h, and the sizes are the blocks the shaders declare: 256 and 224 float4, and 23 shared
@@ -1270,8 +1283,17 @@ constexpr uint32_t kIndicesDomoCielo = 480;
 constexpr uint32_t kCieloFotogramasPrueba = 90;
 constexpr uint32_t kCieloFotogramasConUno = 90;
 constexpr VkDeviceSize kUboBytesVs = 256 * 16;
+#if defined(NFSC_RECOMP)
+// NFS Carbon's pixel shaders use all 256 pixel constants (the character skin reads c232-c239).
+constexpr VkDeviceSize kUboBytesPs = 256 * 16;
+#else
 constexpr VkDeviceSize kUboBytesPs = 224 * 16;
+#endif
+#if defined(NFSC_RECOMP)
+constexpr VkDeviceSize kUboBytesCompartidas = 32 * 16;  // 128 words
+#else
 constexpr VkDeviceSize kUboBytesCompartidas = 31 * 16;
+#endif
 constexpr uint32_t kRemapeoIdentidad = 0xFFF;
 constexpr uint32_t kMaxVerticesPorDibujo = uint32_t(1) << 20;
 constexpr uint32_t kMemoriaFisica = 0x20000000;
@@ -1569,15 +1591,16 @@ int32_t DesplazamientoMosaico3D(int32_t x, int32_t y, int32_t z, uint32_t pitch,
 int32_t UbicacionDeUso(uint8_t uso, uint8_t indice) {
   switch (uso) {
     case 0:  // posicion
-      return indice == 0 ? 0 : (indice == 1 ? 15 : -1);
+      // Positions 2-6 only exist in NFS Carbon (NFSC_RECOMP in XenosRecomp).
+      return indice == 0 ? 0 : (indice == 1 ? 15 : (indice <= 6 ? 14 + indice : -1));
     case 3:  // normal
       return indice == 0 ? 1 : -1;
     case 6:  // tangente
       return indice == 0 ? 2 : -1;
     case 7:  // binormal
       return indice == 0 ? 3 : -1;
-    case 5:  // texcoord
-      return indice < 4 ? 4 + indice : (indice < 8 ? 12 + (indice - 4) : -1);
+    case 5:  // texcoord (8: NFS Carbon)
+      return indice < 4 ? 4 + indice : (indice < 8 ? 12 + (indice - 4) : (indice == 8 ? 21 : -1));
     case 10:  // color
       return indice == 0 ? 8 : (indice == 1 ? 11 : -1);
     case 2:  // indices de mezcla
@@ -1594,7 +1617,15 @@ bool EntradaEntera(uint8_t uso) {
   // Only BLENDINDICES. Since the nfsmw_validado_normales library, normals, tangents and binormals are
   // float4: NFSMW stores them as 16-bit integers (format 26) or as floats, and with uint4 the shader's
   // asfloat gave degenerate directions (seen in the rear-view mirror).
+#if defined(NFSC_RECOMP)
+  // NFS Carbon's skinned meshes (the characters) keep their bone indices as 32-bit floats: with an integer format the
+  // shader read the float's bits as the index and the mesh collapsed. Its library declares them float4 (XenosRecomp
+  // with NFSC_RECOMP); byte indices then come in as USCALED, the same numbers.
+  (void)uso;
+  return false;
+#else
   return uso == 2;
+#endif
 }
 
 uint32_t ComponentesVertice(uint32_t formato) {
@@ -1845,7 +1876,11 @@ struct EnlaceVertices {
 struct EntradaVertices {
   std::vector<AtributoVertices> atributos;
   std::vector<EnlaceVertices> enlaces;
+#if defined(NFSC_RECOMP)
+  std::array<uint32_t, 22> remapeos{};  // g_InputRemap by location (16-21: NFS Carbon)
+#else
   std::array<uint32_t, 16> remapeos{};  // g_InputRemap by location
+#endif
   uint32_t especializacion = 0;
   uint64_t huella = 0;
 };
@@ -2201,7 +2236,11 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     for (uint32_t i = 0; i < 5; ++i) {
       VkFormatProperties fp{};
       ifn.vkGetPhysicalDeviceFormatProperties(dispositivo_->physical_device(), formatos_bc[i], &fp);
-      bc_cpu_[i] = REXCVAR_GET(nfsmw_nativo_texturas_bc_cpu) || (fp.optimalTilingFeatures & requerido) != requerido;
+      // Conservative Samsung proprietary workaround; Mesa keeps native BC support.
+      const bool xclipse = propiedades.driverID == VK_DRIVER_ID_SAMSUNG_PROPRIETARY ||
+          (propiedades.driverID == VkDriverId(0) && std::strstr(propiedades.deviceName, "Xclipse"));
+      bc_cpu_[i] = REXCVAR_GET(nfsmw_nativo_texturas_bc_cpu) ||
+          (fp.optimalTilingFeatures & requerido) != requerido || (xclipse && i >= 3);
       if (bc_cpu_[i]) {
         const VkFormat host = formatos_cpu[i < 3 ? 0 : i - 2];
         ifn.vkGetPhysicalDeviceFormatProperties(dispositivo_->physical_device(), host, &fp);
@@ -2299,6 +2338,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     }
     VkPrimitiveTopology topologia;
     bool cuadrilateros = false;
+    bool rectangulos = false;  // the fourth corner is added to the vertices (below, with the bindings)
     bool admite_reinicio = false;
     switch (tipo) {
       case 2:
@@ -2322,6 +2362,13 @@ class DibujosVulkanImpl final : public DibujosVulkan {
       case 13:
         topologia = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
         cuadrilateros = true;
+        break;
+      case 8:  // rectangle list: three corners per rectangle (Direct3D's own fills in NFS Carbon)
+        if (fuente == uint32_t(xenos::SourceSelect::kDMA) || cuenta % 3) {
+          return Rechazar(100 + tipo, "lista de rectangulos con indices o cuenta suelta: todavia no");
+        }
+        topologia = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        rectangulos = true;
         break;
       default:
         return Rechazar(100 + tipo, "tipo de primitiva todavia no soportado");
@@ -2362,8 +2409,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
       }
       const uint32_t info = r[kInfoColor[i]];
       const uint32_t formato = (info >> 16) & 0xF;
-      if (formato != uint32_t(xenos::ColorRenderTargetFormat::k_8_8_8_8) &&
-          formato != uint32_t(xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA)) {
+      if (FormatoHostDestinoColor(formato) == VK_FORMAT_UNDEFINED) {
         return Rechazar(200 + formato, "formato de destino de color todavia no soportado");
       }
       claves[i] = (uint64_t(1) << 63) | (uint64_t(info & 0xFFF) << 24) | (uint64_t(formato) << 16) |
@@ -2652,6 +2698,19 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     } else {
       vmin = desplazamiento;
       vmax = desplazamiento + cuenta - 1;
+      if (rectangulos) {
+        // Corner, a, fourth, b: two triangles of the same winding as the game's three corners.
+        const uint32_t n = cuenta / 3;
+        vmax = desplazamiento + n * 4 - 1;
+        indices_.resize(size_t(n) * 6);
+        for (uint32_t q = 0; q < n; ++q) {
+          uint32_t* o = &indices_[size_t(q) * 6];
+          const uint32_t v = desplazamiento + q * 4;
+          o[0] = v; o[1] = v + 1; o[2] = v + 2;
+          o[3] = v; o[4] = v + 2; o[5] = v + 3;
+        }
+        con_indices = true;
+      }
       if (cuadrilateros) {
         indices_.resize(cuenta);
         for (uint32_t i = 0; i < cuenta; ++i) {
@@ -2700,7 +2759,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
       const uint64_t direccion = uint64_t(d0 & 0x1FFFFFFC);
       const uint64_t disponibles = uint64_t((d1 >> 2) & 0xFFFFFF) * 4;
       const uint64_t inicio = uint64_t(vmin) * enlace.zancada;
-      uint64_t necesarios = uint64_t(vertices) * enlace.zancada;
+      uint64_t necesarios = uint64_t(rectangulos ? cuenta : vertices) * enlace.zancada;
       if (inicio + necesarios > disponibles) {
         Avisar(11, "vertices mas alla del final de su bufer: se recorta");
         necesarios = disponibles > inicio ? (disponibles - inicio) / enlace.zancada * enlace.zancada : 0;
@@ -2711,7 +2770,96 @@ class DibujosVulkanImpl final : public DibujosVulkan {
       origenes[b] = {memoria_->TranslatePhysical(uint32_t(direccion + inicio)),
                      static_cast<xenos::Endian>(d1 & 0x3), uint32_t(necesarios),
                      direccion + inicio};
-      bytes_vertices += (necesarios + 3) & ~VkDeviceSize(3);
+      if (!rectangulos) {
+        bytes_vertices += (necesarios + 3) & ~VkDeviceSize(3);
+      }
+    }
+    if (rectangulos) {
+      /*
+       * Rectangle lists: the Xenos completes each rectangle from three corners. As in Xenia, the corner with
+       * the right angle is the one opposite the longest side, and the fourth is a + b - corner for every
+       * float attribute (the others are copied from a). The vertices are rebuilt in a buffer of their own,
+       * still in the guest's byte order, in the order corner, a, fourth, b (the indices above).
+       */
+      const uint32_t n = cuenta / 3;
+      const AtributoVertices* posicion = nullptr;
+      for (const AtributoVertices& a : entrada->atributos) {
+        if (a.ubicacion == 0) {
+          posicion = &a;
+        }
+      }
+      if (!posicion || origenes[posicion->enlace].bytes < uint64_t(cuenta) * entrada->enlaces[posicion->enlace].zancada) {
+        return Rechazar(108, "lista de rectangulos sin posicion legible");
+      }
+      const auto leer = [&](const Origen& o, size_t byte) {
+        uint32_t palabra;
+        std::memcpy(&palabra, o.datos + byte, 4);
+        return Flotante(xenos::GpuSwap(palabra, o.orden));
+      };
+      std::array<uint8_t, 1024> esquinas_pequeno{};
+      std::vector<uint8_t> esquinas_grande;
+      uint8_t* esquinas = n <= esquinas_pequeno.size() ? esquinas_pequeno.data()
+                                                       : (esquinas_grande.resize(n), esquinas_grande.data());
+      {
+        const Origen& o = origenes[posicion->enlace];
+        const uint32_t zancada = entrada->enlaces[posicion->enlace].zancada;
+        for (uint32_t q = 0; q < n; ++q) {
+          float x[3], y[3];
+          for (uint32_t k = 0; k < 3; ++k) {
+            const size_t v = size_t(q * 3 + k) * zancada + posicion->offset;
+            x[k] = leer(o, v);
+            y[k] = leer(o, v + 4);
+          }
+          const auto d = [&](uint32_t i, uint32_t j) { return (x[i] - x[j]) * (x[i] - x[j]) + (y[i] - y[j]) * (y[i] - y[j]); };
+          const float d01 = d(0, 1), d02 = d(0, 2), d12 = d(1, 2);
+          esquinas[q] = d12 >= d01 && d12 >= d02 ? 0 : d02 >= d01 ? 1 : 2;  // opposite the longest side
+        }
+      }
+      for (size_t b = 0; b < entrada->enlaces.size(); ++b) {
+        const uint32_t zancada = entrada->enlaces[b].zancada;
+        if (!zancada || zancada % 4) {
+          return Rechazar(108, "lista de rectangulos con zancada no alineada");
+        }
+        // Which words of this binding's vertex are floats.
+        std::array<bool, 64> flotante{};
+        for (const AtributoVertices& a : entrada->atributos) {
+          if (a.enlace != b) continue;
+          const uint32_t palabras = a.formato == VK_FORMAT_R32_SFLOAT ? 1
+                                    : a.formato == VK_FORMAT_R32G32_SFLOAT ? 2
+                                    : a.formato == VK_FORMAT_R32G32B32_SFLOAT ? 3
+                                    : a.formato == VK_FORMAT_R32G32B32A32_SFLOAT ? 4 : 0;
+          for (uint32_t k = 0; k < palabras && a.offset / 4 + k < flotante.size(); ++k) {
+            flotante[a.offset / 4 + k] = true;
+          }
+        }
+        Origen& o = origenes[b];
+        std::vector<uint8_t>& salida = rectangulos_vertices_[b];
+        salida.resize(size_t(n) * 4 * zancada);
+        for (uint32_t q = 0; q < n; ++q) {
+          const uint32_t c = esquinas[q], a = (c + 1) % 3, bb = (c + 2) % 3;
+          const uint8_t* v0 = o.datos + size_t(q * 3) * zancada;
+          uint8_t* destino = salida.data() + size_t(q) * 4 * zancada;
+          std::memcpy(destino, v0 + c * zancada, zancada);
+          std::memcpy(destino + zancada, v0 + a * zancada, zancada);
+          std::memcpy(destino + 3 * zancada, v0 + bb * zancada, zancada);
+          uint8_t* cuarta = destino + 2 * zancada;
+          std::memcpy(cuarta, v0 + a * zancada, zancada);
+          for (uint32_t w = 0; w < zancada / 4 && w < flotante.size(); ++w) {
+            if (!flotante[w]) continue;
+            const float valor = leer(o, size_t(q * 3 + a) * zancada + w * 4) +
+                                leer(o, size_t(q * 3 + bb) * zancada + w * 4) -
+                                leer(o, size_t(q * 3 + c) * zancada + w * 4);
+            uint32_t bits;
+            std::memcpy(&bits, &valor, 4);
+            bits = xenos::GpuSwap(bits, o.orden);  // back to the guest's order (the swap is its own inverse)
+            std::memcpy(cuarta + w * 4, &bits, 4);
+          }
+        }
+        o.datos = salida.data();
+        o.bytes = uint32_t(salida.size());
+        o.direccion = 0;  // not guest memory: copied at once and never deduplicated
+        bytes_vertices += (o.bytes + 3) & ~VkDeviceSize(3);
+      }
     }
 
     // Diagnostic: one line per combination of VS, PS and render target (at most 32).
@@ -3035,7 +3183,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
       VkDeviceSize offset;
       // If this same range was already copied in this frame, its place in the upload buffer is reused and
       // nothing is copied. See nfsmw_nativo_vertices_dedupe.h.
-      if (dedupe_activo_ &&
+      if (dedupe_activo_ && origen.direccion != 0 &&
           dedupe_.Buscar(origen.direccion, origen.bytes, uint32_t(origen.orden), offset)) {
         offsets_vertices[b] = offset;
         continue;
@@ -3047,12 +3195,13 @@ class DibujosVulkanImpl final : public DibujosVulkan {
         Reservar(origen.bytes, 4, offset);
       }
       const TrabajoCopia trabajo{origen.datos, subida_datos_ + offset, origen.bytes / 4, origen.orden};
-      if (!copias_activas_ || !EncolarCopia(trabajo)) {
+      // A rectangle list's buffer is rewritten by the next one: it is copied now, not by the copy thread.
+      if (origen.direccion == 0 || !copias_activas_ || !EncolarCopia(trabajo)) {
         CopiarVertices(trabajo);
       }
       bytes_vertices_ += origen.bytes;
       offsets_vertices[b] = offset;
-      if (dedupe_activo_) {
+      if (dedupe_activo_ && origen.direccion != 0) {
         dedupe_.Anotar(origen.direccion, origen.bytes, uint32_t(origen.orden), offset);
       }
     }
@@ -3183,7 +3332,12 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     std::memcpy(&compartidas[68], &umbral_alfa, sizeof(umbral_alfa));
     compartidas[69] = funcion_alfa;  // g_AlphaFunction
     std::memcpy(&compartidas[70], ndc, sizeof(ndc));
+#if defined(NFSC_RECOMP)
+    std::copy(entrada->remapeos.begin(), entrada->remapeos.begin() + 16, compartidas + 74);
+    std::copy(entrada->remapeos.begin() + 16, entrada->remapeos.end(), compartidas + kPalabraRemapeosAltos);
+#else
     std::copy(entrada->remapeos.begin(), entrada->remapeos.end(), compartidas + 74);
+#endif
     VkDeviceSize offset_compartidas;
     /*
      * How many draws really change the shared constants.
@@ -3566,8 +3720,9 @@ class DibujosVulkanImpl final : public DibujosVulkan {
       clave_enlazada_valida_ = false;  // the counter does not classify this bind
     }
     if (!sets_enlazados_) {
-      NFSMW_SUB(1, dfn_.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_pipeline_, 0, 4,
-                                                sets_.data(), 0, nullptr));
+      // PARCHE LOCAL (NFSMW Recompiled): los montones que haya (4 conjuntos: 3).
+      NFSMW_SUB(1, dfn_.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_pipeline_, 0,
+                                                n_sets_enlace_, sets_enlace_.data(), 0, nullptr));
       sets_enlazados_ = true;
     }
     // Dynamic state and push constants repeat a lot between consecutive draws: they are only recorded if
@@ -3613,7 +3768,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
                           (offsets_ubo[1] != offsets_ubo_enlazados_[1] ? 2u : 0u) |
                           (offsets_ubo[2] != offsets_ubo_enlazados_[2] ? 4u : 0u)];
         }
-        NFSMW_SUB(2, dfn_.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_pipeline_, 4, 1,
+        NFSMW_SUB(2, dfn_.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_pipeline_, conjunto_ubo_, 1,
                                                   &sets_ubo_[ranura_actual_], 3, offsets_ubo.data()));
         offsets_ubo_enlazados_ = offsets_ubo;
         ranura_ubo_enlazada_ = ranura_actual_;
@@ -3876,8 +4031,9 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     eds_valido_ = false;  // the next draw sets all of its own again
     clave_enlazada_valida_ = false;  // The sky does not keep its key (ContarCambioPipeline)
     if (!sets_enlazados_) {
-      dfn_.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_pipeline_, 0, 4,
-                                   sets_.data(), 0, nullptr);
+      // PARCHE LOCAL (NFSMW Recompiled): los montones que haya (4 conjuntos: 3).
+      dfn_.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_pipeline_, 0, n_sets_enlace_,
+                                   sets_enlace_.data(), 0, nullptr);
       sets_enlazados_ = true;
     }
     if (!c.usa_ubo) {
@@ -3885,7 +4041,8 @@ class DibujosVulkanImpl final : public DibujosVulkan {
                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
                               sizeof(c.push), c.push);
     }
-    dfn_.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_pipeline_, 4, 1,
+    // PARCHE LOCAL (NFSMW Recompiled): los UBO van en el conjunto 3 si solo hay 4.
+    dfn_.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_pipeline_, conjunto_ubo_, 1,
                                  &sets_ubo_[c.ranura_ubo], 3, c.offsets_ubo.data());
     dfn_.vkCmdSetViewport(cmd, 0, 1, &c.viewport);
     dfn_.vkCmdSetScissor(cmd, 0, 1, &c.tijera);
@@ -8017,26 +8174,55 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     const VkDescriptorBindingFlags banderas_enlace =
         VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
         VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT;
+    // PARCHE LOCAL (NFSMW Recompiled): los shaders usan 5 conjuntos de descriptores (los montones 2D, 3D,
+    // cubos y samplers, y los UBO en el 4) y Vulkan solo garantiza 4 (maxBoundDescriptorSets). Los Mali
+    // Valhall dan 4, y su driver se cae dentro de vkCreatePipelineLayout con 5. Con 4, el monton de cubos va
+    // en el conjunto del 3D (enlace 1), los samplers en el 2 y los UBO en el 3; CrearModulo cambia los
+    // shaders igual (JuntarConjuntos).
+    {
+      VkPhysicalDeviceProperties fisicas{};
+      dispositivo_->vulkan_instance()->functions().vkGetPhysicalDeviceProperties(dispositivo_->physical_device(),
+                                                                                 &fisicas);
+      if (fisicas.limits.maxBoundDescriptorSets < 4) {
+        REXLOG_ERROR("[compatibilidad] El dispositivo no permite cuatro conjuntos de descriptores");
+        return false;
+      }
+      cuatro_conjuntos_ = fisicas.limits.maxBoundDescriptorSets < 5 || REXCVAR_GET(nfsmw_nativo_cuatro_conjuntos);
+      if (cuatro_conjuntos_) {
+        REXLOG_INFO("[compatibilidad] {} conjuntos de descriptores{}: el monton de cubos va en el conjunto del "
+                    "3D y samplers y UBO bajan uno", fisicas.limits.maxBoundDescriptorSets,
+                    fisicas.limits.maxBoundDescriptorSets < 5 ? "" : " (forzado: nfsmw_nativo_cuatro_conjuntos)");
+      }
+    }
     for (uint32_t i = 0; i < 4; ++i) {
-      VkDescriptorSetLayoutBinding enlace{};
-      enlace.binding = 0;
-      enlace.descriptorType = kTipos[i];
-      enlace.descriptorCount = kCapacidadMonton[i];
-      enlace.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+      montones_[i].capacidad = kCapacidadMonton[i];
+      if (cuatro_conjuntos_ && i == 2) {
+        continue;  // el de cubos va en el conjunto 1
+      }
+      const bool con_cubo = cuatro_conjuntos_ && i == 1;
+      VkDescriptorSetLayoutBinding enlaces[2]{};
+      enlaces[0].binding = 0;
+      enlaces[0].descriptorType = kTipos[i];
+      enlaces[0].descriptorCount = kCapacidadMonton[i];
+      enlaces[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+      enlaces[1] = enlaces[0];
+      enlaces[1].binding = 1;
+      enlaces[1].descriptorType = kTipos[2];
+      enlaces[1].descriptorCount = kCapacidadMonton[2];
+      const VkDescriptorBindingFlags banderas_enlaces[2] = {banderas_enlace, banderas_enlace};
       VkDescriptorSetLayoutBindingFlagsCreateInfo banderas{};
       banderas.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
-      banderas.bindingCount = 1;
-      banderas.pBindingFlags = &banderas_enlace;
+      banderas.bindingCount = con_cubo ? 2 : 1;
+      banderas.pBindingFlags = banderas_enlaces;
       VkDescriptorSetLayoutCreateInfo info{};
       info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
       info.pNext = &banderas;
       info.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
-      info.bindingCount = 1;
-      info.pBindings = &enlace;
+      info.bindingCount = con_cubo ? 2 : 1;
+      info.pBindings = enlaces;
       if (dfn_.vkCreateDescriptorSetLayout(device_, &info, nullptr, &layouts_[i]) != VK_SUCCESS) {
         return false;
       }
-      montones_[i].capacidad = kCapacidadMonton[i];
     }
     const VkDescriptorPoolSize tamanos[2] = {
         {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
@@ -8051,14 +8237,34 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     if (dfn_.vkCreateDescriptorPool(device_, &info_pool, nullptr, &pool_) != VK_SUCCESS) {
       return false;
     }
+    // PARCHE LOCAL (NFSMW Recompiled): con 4 conjuntos son 3 de montones, y sets_[2] (cubos) es el mismo
+    // que sets_[1].
+    std::array<VkDescriptorSetLayout, 4> layouts_reserva{};
+    std::array<VkDescriptorSet, 4> reservados{};
+    uint32_t n_reserva = 0;
+    for (VkDescriptorSetLayout l : layouts_) {
+      if (l != VK_NULL_HANDLE) {
+        layouts_reserva[n_reserva++] = l;
+      }
+    }
     VkDescriptorSetAllocateInfo reserva{};
     reserva.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     reserva.descriptorPool = pool_;
-    reserva.descriptorSetCount = 4;
-    reserva.pSetLayouts = layouts_.data();
-    if (dfn_.vkAllocateDescriptorSets(device_, &reserva, sets_.data()) != VK_SUCCESS) {
+    reserva.descriptorSetCount = n_reserva;
+    reserva.pSetLayouts = layouts_reserva.data();
+    if (dfn_.vkAllocateDescriptorSets(device_, &reserva, reservados.data()) != VK_SUCCESS) {
       return false;
     }
+    n_sets_enlace_ = 0;
+    for (uint32_t i = 0; i < 4; ++i) {
+      if (layouts_[i] != VK_NULL_HANDLE) {
+        sets_[i] = reservados[n_sets_enlace_];
+        sets_enlace_[n_sets_enlace_++] = sets_[i];
+      } else {
+        sets_[i] = sets_[i - 1];
+      }
+    }
+    conjunto_ubo_ = n_sets_enlace_;
     // --- Set 4, the constants through dynamic UBOs ------------------------------------------------------
     // Always created: the shaders of the current library use it statically even with the bit off (it is
     // then bound with offsets 0). With an older library it is unnecessary and harmless. No
@@ -8145,9 +8351,16 @@ class DibujosVulkanImpl final : public DibujosVulkan {
                                     24};
     VkPipelineLayoutCreateInfo info_layout{};
     info_layout.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    const std::array<VkDescriptorSetLayout, 5> layouts_pipeline = {layouts_[0], layouts_[1], layouts_[2],
-                                                                    layouts_[3], layout_ubo_};
-    info_layout.setLayoutCount = 5;
+    // PARCHE LOCAL (NFSMW Recompiled): con 4 conjuntos, sin el de cubos (va en el 1) y los UBO en el 3.
+    std::array<VkDescriptorSetLayout, 5> layouts_pipeline{};
+    uint32_t n_layouts = 0;
+    for (VkDescriptorSetLayout l : layouts_) {
+      if (l != VK_NULL_HANDLE) {
+        layouts_pipeline[n_layouts++] = l;
+      }
+    }
+    layouts_pipeline[n_layouts++] = layout_ubo_;
+    info_layout.setLayoutCount = n_layouts;
     info_layout.pSetLayouts = layouts_pipeline.data();
     info_layout.pushConstantRangeCount = 1;
     info_layout.pPushConstantRanges = &rango;
@@ -8252,7 +8465,8 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     VkWriteDescriptorSet escritura{};
     escritura.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     escritura.dstSet = sets_[monton];
-    escritura.dstBinding = 0;
+    // PARCHE LOCAL (NFSMW Recompiled): con 4 conjuntos, el monton de cubos es el enlace 1 del conjunto 1.
+    escritura.dstBinding = cuatro_conjuntos_ && monton == 2 ? 1 : 0;
     escritura.dstArrayElement = ranura;
     escritura.descriptorCount = 1;
     escritura.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
@@ -8439,8 +8653,15 @@ class DibujosVulkanImpl final : public DibujosVulkan {
         Rechazar(24, "offset de vertice negativo");
         return nullptr;
       }
+      if (size_t(ubicacion) >= entrada_.remapeos.size() && codigo != kRemapeoIdentidad) {
+        // Most Wanted's shaders only read g_InputRemap for 16 locations (Carbon's has 22: never taken there).
+        Rechazar(26, "remapeo de swizzle en una ubicacion sin g_InputRemap");
+        return nullptr;
+      }
       entrada_.atributos.push_back({uint32_t(ubicacion), enlace, vk, uint32_t(offset)});
-      entrada_.remapeos[ubicacion] = codigo;
+      if (size_t(ubicacion) < entrada_.remapeos.size()) {
+        entrada_.remapeos[ubicacion] = codigo;
+      }
       ubicaciones_usadas |= uint32_t(1) << ubicacion;
     }
     for (const EnlaceVertices& enlace : entrada_.enlaces) {
@@ -10471,6 +10692,15 @@ class DibujosVulkanImpl final : public DibujosVulkan {
         info.pCode = convertido.data();
       }
     }
+    if (cuatro_conjuntos_) {
+      if (convertido.empty()) convertido.assign(spirv, spirv + bytes / 4);
+      if (!nfsmw::spirv::JuntarConjuntos(convertido)) {
+        REXLOG_ERROR("[compatibilidad] SPIR-V invalido al adaptar los conjuntos de descriptores");
+        return VK_ERROR_INITIALIZATION_FAILED;
+      }
+      info.codeSize = convertido.size() * sizeof(uint32_t);
+      info.pCode = convertido.data();
+    }
     return dfn_.vkCreateShaderModule(device_, &info, nullptr, modulo);
   }
 
@@ -12284,6 +12514,12 @@ class DibujosVulkanImpl final : public DibujosVulkan {
   std::array<VkDescriptorSetLayout, 4> layouts_{};
   VkDescriptorPool pool_ = VK_NULL_HANDLE;
   std::array<VkDescriptorSet, 4> sets_{};
+  // PARCHE LOCAL (NFSMW Recompiled): GPU con solo 4 conjuntos de descriptores (CrearDescriptores). Lo que se
+  // enlaza de los montones (el de cubos va dentro del 1), cuantos son y en que conjunto van los UBO.
+  bool cuatro_conjuntos_ = false;
+  std::array<VkDescriptorSet, 4> sets_enlace_{};
+  uint32_t n_sets_enlace_ = 4;
+  uint32_t conjunto_ubo_ = 4;
   VkPipelineLayout layout_pipeline_ = VK_NULL_HANDLE;
   // Set 4, the constants through dynamic UBOs. One set per upload slot (each one is a VkBuffer).
   bool usar_ubo_ = false;
@@ -12535,6 +12771,8 @@ class DibujosVulkanImpl final : public DibujosVulkan {
   std::vector<uint32_t, SinInicializar<uint32_t>> indices_;
   std::vector<uint32_t, SinInicializar<uint32_t>> convertidos_;
   std::vector<uint16_t, SinInicializar<uint16_t>> indices16_;  // camino rapido: 16 bits sin convertir
+  // Rectangle lists (NFS Carbon): each binding's vertices with the fourth corner of every rectangle added.
+  std::array<std::vector<uint8_t>, 16> rectangulos_vertices_;
   // IndicesDe16 (nfsmw_nativo_indices_neon). Ring only.
   int32_t indices_neon_ = -1;  // -1 cvar not read, 0 plain loop, 1 NEON
   uint64_t indices_neon_dibujos_ = 0;

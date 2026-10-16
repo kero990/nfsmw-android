@@ -25,6 +25,18 @@
 #include "vulkan_moltenvk.h"
 #endif
 
+#if REX_PLATFORM_ANDROID
+#include <rex/ui/vulkan/android_gpu_driver.h>
+REXCVAR_DEFINE_STRING(android_gpu_driver_dir, "", "UI/Vulkan", "Android custom driver directory")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_STRING(android_gpu_driver_name, "", "UI/Vulkan", "Android custom driver library; empty = system")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_STRING(android_native_lib_dir, "", "UI/Vulkan", "Android hook library directory")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_STRING(android_tmp_dir, "", "UI/Vulkan", "Android custom loader temporary directory")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+#endif
+
 REXCVAR_DEFINE_BOOL(vulkan_log_debug_messages, true, "UI/Vulkan", "Log Vulkan debug messages");
 
 #if REX_PLATFORM_SWITCH
@@ -93,7 +105,16 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
   ifn.vkDestroyInstance = &::vkDestroyInstance;
   loader_loaded = true;
 #else
+#if REX_PLATFORM_ANDROID
+  vulkan_instance->loader_.Adopt(rex_android_open_vulkan(
+      REXCVAR_GET(android_native_lib_dir).c_str(), REXCVAR_GET(android_tmp_dir).c_str(),
+      REXCVAR_GET(android_gpu_driver_dir).c_str(), REXCVAR_GET(android_gpu_driver_name).c_str()));
+  loader_loaded = bool(vulkan_instance->loader_);
+  REXLOG_INFO("Vulkan requested driver: {}", REXCVAR_GET(android_gpu_driver_name).empty()
+      ? "system" : REXCVAR_GET(android_gpu_driver_name));
+#else
   loader_loaded = vulkan_instance->loader_.Load(platform::lib_names::kVulkanLoader);
+#endif
   if (!loader_loaded) {
     REXLOG_ERROR("Failed to load {}", platform::lib_names::kVulkanLoader);
     return nullptr;
@@ -411,18 +432,21 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
 
   // Load instance functions.
 
-#define XE_UI_VULKAN_FUNCTION(name)                                                            \
-  functions_loaded &=                                                                          \
-      (ifn.name = PFN_##name(ifn.vkGetInstanceProcAddr(vulkan_instance->instance_, #name))) != \
-      nullptr;
+#define XE_UI_VULKAN_FUNCTION(name) \
+  if ((ifn.name = PFN_##name(ifn.vkGetInstanceProcAddr(vulkan_instance->instance_, #name))) == nullptr) { \
+    REXLOG_ERROR("Vulkan instance function {} is not available", #name); \
+    functions_loaded = false; \
+  }
 
   // Vulkan 1.0.
 #include <rex/ui/vulkan/functions/instance_1_0.inc>
 
   // Extensions promoted to a Vulkan version supported by the instance.
-#define XE_UI_VULKAN_FUNCTION_PROMOTED(extension_name, core_name)                 \
-  functions_loaded &= (ifn.core_name = PFN_##core_name(ifn.vkGetInstanceProcAddr( \
-                           vulkan_instance->instance_, #core_name))) != nullptr;
+#define XE_UI_VULKAN_FUNCTION_PROMOTED(extension_name, core_name) \
+  if ((ifn.core_name = PFN_##core_name(ifn.vkGetInstanceProcAddr(vulkan_instance->instance_, #core_name))) == nullptr) { \
+    REXLOG_ERROR("Vulkan instance function {} is not available", #core_name); \
+    functions_loaded = false; \
+  }
   if (vulkan_instance->api_version_ >= VK_MAKE_API_VERSION(0, 1, 1, 0)) {
 #include <rex/ui/vulkan/functions/instance_1_1_khr_get_physical_device_properties2.inc>
   }
@@ -430,9 +454,11 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
 
   // Non-promoted extensions, and extensions promoted to a Vulkan version not
   // supported by the instance.
-#define XE_UI_VULKAN_FUNCTION_PROMOTED(extension_name, core_name)                 \
-  functions_loaded &= (ifn.core_name = PFN_##core_name(ifn.vkGetInstanceProcAddr( \
-                           vulkan_instance->instance_, #extension_name))) != nullptr;
+#define XE_UI_VULKAN_FUNCTION_PROMOTED(extension_name, core_name) \
+  if ((ifn.core_name = PFN_##core_name(ifn.vkGetInstanceProcAddr(vulkan_instance->instance_, #extension_name))) == nullptr) { \
+    REXLOG_ERROR("Vulkan instance function {} is not available", #extension_name); \
+    functions_loaded = false; \
+  }
   if (vulkan_instance->api_version_ < VK_MAKE_API_VERSION(0, 1, 1, 0)) {
     if (vulkan_instance->extensions_.ext_1_1_KHR_get_physical_device_properties2) {
 #include <rex/ui/vulkan/functions/instance_1_1_khr_get_physical_device_properties2.inc>

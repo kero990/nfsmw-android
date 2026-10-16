@@ -30,9 +30,12 @@ REXCVAR_DEFINE_BOOL(vulkan_require_fragment_stores_and_atomics, true, "UI/Vulkan
                     "Deprecated and ignored for parity; fragmentStoresAndAtomics is always "
                     "required for Vulkan GPU emulation")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(vulkan_require_vertex_pipeline_stores_and_atomics, true, "UI/Vulkan",
-                    "Deprecated and ignored for parity; vertexPipelineStoresAndAtomics is always "
-                    "required for Vulkan GPU emulation")
+// Android: optional. Many Mali-G52/G57 drivers lack it, and without it the only thing lost is memory export from
+// vertex shaders (those draws are skipped, see VulkanCommandProcessor::IssueDraw); requiring it left those phones
+// with no renderer at all (their drivers also lack the descriptor indexing of the native renderer).
+REXCVAR_DEFINE_BOOL(vulkan_require_vertex_pipeline_stores_and_atomics, !REX_PLATFORM_ANDROID, "UI/Vulkan",
+                    "Require vertexPipelineStoresAndAtomics for Vulkan GPU emulation (without it, vertex "
+                    "shader memory export draws are skipped)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 // Apple Silicon / MoltenVK does not expose geometryShader or fillModeNonSolid;
 // default both to false on macOS so the device can still be selected.
@@ -121,11 +124,17 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
       return nullptr;
     }
     if (!supported_features.vertexPipelineStoresAndAtomics) {
+      if (REXCVAR_GET(vulkan_require_vertex_pipeline_stores_and_atomics)) {
+        REXLOG_WARN(
+            "Vulkan device '{}' doesn't support vertexPipelineStoresAndAtomics, which "
+            "is required for Vulkan GPU emulation parity",
+            properties.deviceName);
+        return nullptr;
+      }
       REXLOG_WARN(
-          "Vulkan device '{}' doesn't support vertexPipelineStoresAndAtomics, which "
-          "is required for Vulkan GPU emulation parity",
+          "Vulkan device '{}' doesn't support vertexPipelineStoresAndAtomics: vertex shader memory "
+          "export draws will be skipped",
           properties.deviceName);
-      return nullptr;
     }
     if (REXCVAR_GET(vulkan_require_geometry_shader) && !supported_features.geometryShader) {
       REXLOG_WARN(

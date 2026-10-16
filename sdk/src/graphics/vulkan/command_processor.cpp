@@ -938,10 +938,13 @@ bool VulkanCommandProcessor::SetupContext() {
     return false;
   }
   if (!device_properties.vertexPipelineStoresAndAtomics) {
-    REXGPU_ERROR(
-        "Vulkan vertexPipelineStoresAndAtomics is required for GPU emulation and "
-        "D3D12 parity, but unsupported by the selected device");
-    return false;
+    if (REXCVAR_GET(vulkan_require_vertex_pipeline_stores_and_atomics)) {
+      REXGPU_ERROR(
+          "Vulkan vertexPipelineStoresAndAtomics is required for GPU emulation and "
+          "D3D12 parity, but unsupported by the selected device");
+      return false;
+    }
+    REXGPU_WARN("Vulkan vertexPipelineStoresAndAtomics unsupported: vertex shader memory export draws are skipped");
   }
   if (!device_properties.geometryShader) {
     if (REXCVAR_GET(vulkan_require_geometry_shader)) {

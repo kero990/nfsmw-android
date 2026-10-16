@@ -92,6 +92,10 @@ final class GameOptions {
             new Option("volume", "Volumen del juego", "audio_ganancia_pct", "100",
                     new String[] {"100", "125", "150", "200"},
                     new String[] {"Normal", "Alto", "Muy alto", "Máximo · puede saturar"}),
+            // SDL pump frames queued ahead (5.3 ms each): more of them ride over hitches without audio cuts.
+            new Option("audio_buffer", "Búfer de audio", "audio_sdl_bomba_cola", "12",
+                    new String[] {"12", "20"},
+                    new String[] {"Normal · 64 ms", "Grande · 107 ms, si hay cortes"}),
             new Option("filter", "Filtro de imagen", "nfsmw_posproceso", "apagado",
                     new String[] {"apagado", "cine", "vivo", "calido", "frio", "sepia", "noir", "crt"},
                     new String[] {"Sin filtro", "Cine", "Vivo", "Cálido", "Frío", "Sepia", "Blanco y negro",
@@ -157,6 +161,7 @@ final class GameOptions {
             args.add("--nfsmw_efecto_pasada_nativo=false");
             args.add("--nfsmw_pegamento_nativo=false");
         }
+        GpuDrivers.arguments(context, args);
         return args;
     }
 }

@@ -18,7 +18,11 @@ static constexpr const char* USAGE_TYPES[] =
 {
     "float4", // POSITION
     "float4", // BLENDWEIGHT
+#ifdef NFSC_RECOMP
+    "float4", // BLENDINDICES: NFS Carbon stores them as 32-bit floats as well as bytes (USCALED in the renderer)
+#else
     "uint4", // BLENDINDICES
+#endif
 #ifdef NFSMW_RECOMP
     "float4", // NORMAL: NFSMW stores them as 16-bit integers or as float
 #else
@@ -104,7 +108,24 @@ static constexpr DeclUsageLocation USAGE_LOCATIONS[] =
     { DeclUsage::TexCoord, 6, 14 },
     { DeclUsage::TexCoord, 7, 15 },
     { DeclUsage::Position, 1, 15 },
+#ifdef NFSC_RECOMP
+    // NFS Carbon: one vertex shader reads seven positions and another TEXCOORD8.
+    { DeclUsage::Position, 2, 16 },
+    { DeclUsage::Position, 3, 17 },
+    { DeclUsage::Position, 4, 18 },
+    { DeclUsage::Position, 5, 19 },
+    { DeclUsage::Position, 6, 20 },
+    { DeclUsage::TexCoord, 8, 21 },
+#endif
 };
+
+// Float constants of a pixel shader: 224 in Most Wanted's shader_common.h, all 256 for NFS Carbon (its character
+// skin shader reads c232-c239).
+#ifdef NFSC_RECOMP
+static constexpr uint32_t kPixelConstants = 256;
+#else
+static constexpr uint32_t kPixelConstants = 224;
+#endif
 
 static constexpr std::pair<DeclUsage, size_t> INTERPOLATORS[] =
 {
@@ -132,6 +153,12 @@ static constexpr std::pair<DeclUsage, size_t> INTERPOLATORS[] =
     , { DeclUsage::Color, 3 }
     , { DeclUsage::Color, 4 }
     , { DeclUsage::Color, 5 }
+#endif
+#ifdef NFSC_RECOMP
+    // NFS Carbon's vertex shaders also write the fog output (oFog0), and one writes NORMAL0, which Most
+    // Wanted's never use.
+    , { DeclUsage::Fog, 0 }
+    , { DeclUsage::Normal, 0 }
 #endif
 };
 
@@ -205,6 +232,11 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
             break;
         }
     }
+#ifndef NFSC_RECOMP
+    // g_InputRemap holds 16 locations here; NFS Carbon's shader_common.h has 22 (its extra positions and TEXCOORD8).
+    if (remapLocation >= 16)
+        remapLocation = -1;
+#endif
     if (remapLocation >= 0)
         out += "remapInput(float4(";
 #endif
@@ -1211,7 +1243,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
 
             if (constantInfo->registerCount > 1)
             {
-                uint32_t tailCount = (isPixelShader ? 224 : 256) - constantInfo->registerIndex;
+                uint32_t tailCount = (isPixelShader ? kPixelConstants : 256) - constantInfo->registerIndex;
 
                 // NFSMW: dynamic UBO or pointer, depending on SPEC_CONSTANT_CONSTANTES_UBO.
                 println("#define {}(INDEX) select((INDEX) < {}, (NFSMW_UBO ? g_Ubo{}.v[{} + min(INDEX, {})] : vk::RawBufferLoad<float4>(g_PushConstants.{}ShaderConstants + ({} + min(INDEX, {})) * 16, 0x10)), 0.0)",
@@ -1240,6 +1272,14 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
 
             println("#define {}_SamplerDescriptorIndex (NFSMW_UBO ? NFSMW_COMPARTIDA_UINT({}) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + {}))",
                 constantName, std::size(TEXTURE_DIMENSIONS) * 64 + constantInfo->registerIndex * 4, std::size(TEXTURE_DIMENSIONS) * 64 + constantInfo->registerIndex * 4);
+#ifdef NFSC_RECOMP
+            // NFS Carbon samples 1D textures: they are bound as 2D images of height 1, so a 1D fetch is a 2D one
+            // at the middle row.
+            println("#define {0}_Texture1DDescriptorIndex {0}_Texture2DDescriptorIndex", constantName);
+            out += "#ifndef tfetch1D\n"
+                   "#define tfetch1D(RES, SAMP, COORD) tfetch2D(RES, SAMP, float2(COORD, 0.5), float2(0.0, 0.0), float2(0.0, 0.0))\n"
+                   "#endif\n";
+#endif
 
             // 1/size of the host image of that slot, which the renderer writes at byte
             // 360 + slot * 8 of the shared constants (right after g_InputRemap).
@@ -1279,7 +1319,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
 
             if (constantInfo->registerCount > 1)
             {
-                uint32_t tailCount = (isPixelShader ? 224 : 256) - constantInfo->registerIndex;
+                uint32_t tailCount = (isPixelShader ? kPixelConstants : 256) - constantInfo->registerIndex;
                 println("#define {0}(INDEX) select((INDEX) < {1}, {0}[min(INDEX, {2})], 0.0)", constantName, tailCount, tailCount - 1);
             }
         }

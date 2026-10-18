@@ -21,6 +21,17 @@ app*/src/copias_literales/
 app*/src/nfsmw_nativo_resplandor_*_spirv.h
 app_*/
 
+# app_cht: the Asia (traditional Chinese) edition tree is part of this fork's source, not a build artefact:
+# tools/editions/crear_arbol.py translates app/ with the map in tools/editions/asia/tabla.tsv, and the result is
+# what the Android APK embeds (android/app/src/main/cpp/CMakeLists.txt adds app_cht). The un-ignore has to come
+# after app_*/ to win, and the three lines below it re-ignore exactly what app/ keeps out, so the repository stays
+# source-only: the recompiled code and the literal copies are never committed for this tree either.
+!app_cht/
+!app_cht/**
+app_cht/generated/
+app_cht/src/copias_literales/
+app_cht/src/nfsmw_nativo_resplandor_*_spirv.h
+
 # --- Build output -------------------------------------------------------------
 out/
 build/

@@ -1,0 +1,171 @@
+name: Build APK
+
+# Builds the release APK on a GitHub-hosted runner and publishes it.
+#
+# What is and is not needed, and why (see docs/editions.md and tmp/README-x86.md in the build notes):
+#
+#   * app/CMakeLists.txt and app_cht/CMakeLists.txt include generated/rexglue.cmake, so a fresh clone cannot
+#     configure until the code generated from default.xex exists. Those trees (app/generated, app_cht/generated
+#     and the two src/copias_literales/) are not committed, on purpose: they are translated from the game.
+#   * The APK is built from app_cht, the Asia (traditional Chinese) edition tree, which this fork does commit as
+#     source. So the only thing the workflow needs from outside is the Asia executable, apps/game_root/default_cn.xex.
+#     The PAL default.xex is NOT needed here: it is only used to rebuild app_cht/src from app/ with
+#     tools/editions/crear_arbol.py, a maintenance step done by hand (see below).
+#   * The two code generators tools/codegen.sh runs are pure OSS: fetch_thirdparty.py downloads the ReXGlue SDK
+#     sources, the host rexglue is built from sdk/ with clang, and the two Python steps rewrite calls in the
+#     generated C++. They are cached between runs; nothing derived from the game is.
+#
+# The executable comes from WebDAV, through repository secrets:
+#   NFSMW_XEX_BASEURL   base URL, the file is fetched from <base>/default_cn.xex
+#   NFSMW_WEBDAV_USER   optional, HTTP basic auth user
+#   NFSMW_WEBDAV_PASS   optional, HTTP basic auth password
+# Nothing from the game is stored anywhere on GitHub: it is downloaded, used and thrown away with the runner.
+#
+# Maintenance: when app/src changes upstream, rebuild app_cht/src locally with
+#   REXGLUE=out/host/rexglue PYTHON=python3 bash tools/codegen.sh app
+#   python3 tools/editions/crear_arbol.py cht tools/editions/asia/tabla.tsv \
+#           ../assets/game_root/default_cn.xex --parejas tools/editions/asia/parejas_corregidas.json
+#   cp tools/editions/asia/tabla.tsv app_cht/tabla.tsv
+# and commit the result. crear_arbol.py exits 1 when it finds addresses it cannot translate safely
+# (826E4350, 826E4790, 826FBB68 at the time of writing); the tree is written anyway.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# One build at a time: the workspace and the caches are shared.
+concurrency:
+  group: build-apk
+  cancel-in-progress: false
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    # 144 MB of generated C++ on four cores, ThinLTO at the end. Comfortably inside the six hour limit, but
+    # it is a long build; the first runs are the ones to watch for memory (see the note in app_cht/CMakeLists.txt).
+    timeout-minutes: 350
+    env:
+      NDK_VERSION: 28.2.13676358
+      CMAKE_VERSION: 3.30.5
+    steps:
+      - uses: actions/checkout@v4
+
+      # The generated code plus the object files need a few GB; the stock image keeps the NDK and several
+      # tool caches we do not use.
+      - name: Make room
+        run: |
+          sudo rm -rf /usr/local/lib/android/sdk/ndk /usr/share/dotnet /opt/ghc /usr/local/share/boost
+          df -h /
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK components
+        run: |
+          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH"
+          yes | sdkmanager --licenses > /dev/null
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" \
+                     "ndk;$NDK_VERSION" "cmake;$CMAKE_VERSION"
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > android/local.properties
+
+      # The host code generator is built with clang, as docs/building.md does (clang 20): the image ships an
+      # older one, so take 20 from llvm.org. Only used for the host tool, never for the APK.
+      - name: Install clang 20
+        run: |
+          . /etc/os-release
+          wget -qO /etc/apt/trusted.gpg.d/llvm.asc https://apt.llvm.org/llvm-snapshot.gpg.key
+          echo "deb http://apt.llvm.org/$VERSION_CODENAME/ llvm-toolchain-$VERSION_CODENAME-20 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm-20.list > /dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang-20
+
+      # Third-party sources and the host code generator: OSS, no game data, safe to cache. The key covers the
+      # pinned ReXGlue commit in fetch_thirdparty.py and the SDK sources, so a bump rebuilds them.
+      - name: Cache third-party sources and the host code generator
+        uses: actions/cache@v4
+        with:
+          path: |
+            sdk/thirdparty
+            out/host
+          key: host-${{ runner.os }}-${{ hashFiles('tools/fetch_thirdparty.py') }}-${{ hashFiles('sdk/CMakeLists.txt', 'sdk/src/**', 'sdk/include/**') }}
+
+      - name: Get the missing libraries
+        run: python3 tools/fetch_thirdparty.py
+
+      - name: Build the host code generator
+        run: |
+          if [ ! -x out/host/rexglue ]; then
+            cmake -S sdk -B out/host -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                  -DCMAKE_C_COMPILER=clang-20 -DCMAKE_CXX_COMPILER=clang++-20
+            cmake --build out/host --target rexglue -j "$(nproc)"
+          fi
+          out/host/rexglue --version || true
+
+      # The one file that has to come from the game. It is read while the tree is generated, never while the
+      # APK is built: app_cht/CMakeLists.txt takes game_root from beside the executable at run time.
+      - name: Get the Asia executable (WebDAV)
+        env:
+          BASE: ${{ secrets.NFSMW_XEX_BASEURL }}
+          WEBDAV_USER: ${{ secrets.NFSMW_WEBDAV_USER }}
+          WEBDAV_PASS: ${{ secrets.NFSMW_WEBDAV_PASS }}
+        run: |
+          set -e
+          if [ -z "$BASE" ]; then
+            echo "::error::set the NFSMW_XEX_BASEURL secret (base URL serving default_cn.xex)"
+            exit 1
+          fi
+          mkdir -p assets/game_root
+          auth=()
+          [ -n "$WEBDAV_USER" ] && auth=(--user "$WEBDAV_USER:$WEBDAV_PASS")
+          curl -fSL --retry 3 "${auth[@]}" -o assets/game_root/default_cn.xex "$BASE/default_cn.xex"
+          ls -l assets/game_root/default_cn.xex
+
+      - name: Generate the Asia tree's code
+        run: |
+          REXGLUE="$PWD/out/host/rexglue" PYTHON=python3 \
+            bash tools/codegen.sh app_cht app_cht/enganchadas.txt app_cht/tabla.tsv
+
+      - name: Build the release APK
+        run: |
+          cd android
+          ./gradlew --no-daemon --stacktrace assembleRelease
+
+      - name: Check and package the APK
+        id: apk
+        run: |
+          set -e
+          APK=android/app/build/outputs/apk/release/app-release.apk
+          [ -f "$APK" ] || { echo "::error::no APK at $APK"; exit 1; }
+          cp "$APK" "nfsmw-android-zh-arm64.apk"
+          sha256sum "nfsmw-android-zh-arm64.apk" | tee SHA256SUMS.txt
+          unzip -l "nfsmw-android-zh-arm64.apk" | grep -E 'lib/arm64-v8a/(libmain|libnx)' || true
+          echo "size=$(stat -c %s nfsmw-android-zh-arm64.apk)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nfsmw-android-zh-arm64
+          path: |
+            nfsmw-android-zh-arm64.apk
+            SHA256SUMS.txt
+          retention-days: 14
+
+      - name: Publish the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          OUT=nfsmw-android-zh-arm64.apk
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$OUT" SHA256SUMS.txt --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "$OUT" SHA256SUMS.txt \
+              --title "$GITHUB_REF_NAME" \
+              --notes "Built from $GITHUB_SHA by the Build APK workflow."
+          fi

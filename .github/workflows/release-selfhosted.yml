@@ -1,0 +1,106 @@
+name: Release APK (self-hosted)
+
+# Why self-hosted instead of ubuntu-latest:
+#
+# The APK cannot be built from a fresh clone. app/CMakeLists.txt does
+# include(generated/rexglue.cmake), and the build needs four trees that are
+# untracked on purpose (see .gitignore, "Nothing derived from the game is ever
+# committed"):
+#
+#   app/generated/             code recompiled from default.xex
+#   app/src/copias_literales/  literal copies taken from that code
+#   app_cht/                   the Asia edition tree, incl. its own generated/
+#   sdk/thirdparty/            SDL3, FFmpeg, CLI11, ...
+#
+# No hosted runner can produce those, so the job runs on the machine that has
+# the game and has already run tools/codegen.sh. Nothing copyrighted ever
+# leaves it; only the resulting APK is uploaded, which is what upstream does
+# with its own releases.
+#
+# One-time setup on that machine (the x86 build box):
+#   1. Keep a checkout of this repo at $HOME/nfsmw-android (or set the
+#      environment variable NFSMW_BUILD_DIR) with the four trees above in place,
+#      and make `origin` the fork (fetch + push).
+#   2. Register the runner:
+#        gh api -X POST repos/<you>/nfsmw-android/actions/runners/registration-token
+#        ./config.sh --url https://github.com/<you>/nfsmw-android \
+#                    --token <token> --labels nfsmw-build
+#        sudo ./svc.sh install && sudo ./svc.sh start
+#   3. Enable Actions in the fork (forks start with workflows disabled).
+#
+# Publishing needs `gh` on the runner. The APK is signed with the debug key
+# (release.signingConfig in android/app/build.gradle), same as upstream, so no
+# keystore secret is needed.
+#
+# Bump versionCode/versionName in android/app/build.gradle before tagging.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-apk
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # `nfsmw-build` is the label given to the runner above; a hosted runner
+    # would fail at the "Locate the build tree" step by design.
+    runs-on: [self-hosted, nfsmw-build]
+    steps:
+      - name: Locate the build tree
+        id: tree
+        run: |
+          B="${NFSMW_BUILD_DIR:-$HOME/nfsmw-android}"
+          for d in app/generated app/src/copias_literales app_cht sdk/thirdparty/sdl3; do
+            if [ ! -e "$B/$d" ]; then
+              echo "::error::$B/$d is missing: this runner must be the machine that ran tools/codegen.sh"
+              exit 1
+            fi
+          done
+          echo "dir=$B" >> "$GITHUB_OUTPUT"
+
+      # Not actions/checkout: it would `git clean -ffdx` the untracked game-derived
+      # trees. A plain detached checkout leaves them where they are.
+      - name: Update the working tree
+        run: |
+          cd "${{ steps.tree.outputs.dir }}"
+          git fetch --prune --tags origin
+          git checkout -f --detach "$GITHUB_SHA"
+          git log -1 --oneline
+
+      - name: Build the release APK
+        run: |
+          cd "${{ steps.tree.outputs.dir }}/android"
+          ./gradlew --no-daemon assembleRelease
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          cd "${{ steps.tree.outputs.dir }}"
+          APK=android/app/build/outputs/apk/release/app-release.apk
+          [ -f "$APK" ] || { echo "::error::no APK at $APK"; exit 1; }
+
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            TAG="$GITHUB_REF_NAME"
+          else
+            TAG="build-$(date -u +%Y%m%d)-$GITHUB_RUN_NUMBER"
+          fi
+
+          OUT="NFSMW-Android-zh-$TAG-arm64.apk"
+          cp "$APK" "$OUT"
+          sha256sum "$OUT" > "SHA256SUMS-$TAG.txt"
+
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" "$OUT" "SHA256SUMS-$TAG.txt" --clobber
+          else
+            gh release create "$TAG" "$OUT" "SHA256SUMS-$TAG.txt" \
+              --title "$TAG" \
+              --notes "Built from $GITHUB_SHA by the self-hosted runner."
+          fi

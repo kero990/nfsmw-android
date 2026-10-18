@@ -315,10 +315,15 @@ jobs:
         run: |
           set -e
           OUT=nfsmw-android-zh-arm64.apk
+          NOTES="Built from $GITHUB_SHA by the Build APK workflow."
           if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            # Re-running a release means the tag was moved (delete it, tag the new commit, push): GitHub
+            # turns the existing release into a draft when its tag goes away, and its notes still name the
+            # older commit. Replace the assets and put both back.
             gh release upload "$GITHUB_REF_NAME" "$OUT" SHA256SUMS.txt --clobber
+            gh release edit "$GITHUB_REF_NAME" --draft=false --notes "$NOTES"
           else
             gh release create "$GITHUB_REF_NAME" "$OUT" SHA256SUMS.txt \
               --title "$GITHUB_REF_NAME" \
-              --notes "Built from $GITHUB_SHA by the Build APK workflow."
+              --notes "$NOTES"
           fi

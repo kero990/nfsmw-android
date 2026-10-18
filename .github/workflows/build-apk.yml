@@ -62,7 +62,7 @@ jobs:
       NDK_VERSION: 28.2.13676358
       CMAKE_VERSION: 3.30.5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # First, before anything expensive: the one file that has to come from the game, and the one step that
       # can fail because of a mistyped secret in seconds instead of an hour into the build. It is read while
@@ -108,7 +108,7 @@ jobs:
           sudo rm -rf /usr/local/lib/android/sdk/ndk /usr/share/dotnet /opt/ghc /usr/local/share/boost
           df -h /
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
@@ -122,20 +122,25 @@ jobs:
           echo "sdk.dir=$ANDROID_SDK_ROOT" > android/local.properties
 
       # The host code generator is built with clang, as docs/building.md does (clang 20): the image ships an
-      # older one, so take 20 from llvm.org. Only used for the host tool, never for the APK.
+      # older one, so take 20 from llvm.org. Only used for the host tool, never for the APK. Everything here
+      # needs sudo: the job runs as an unprivileged user.
       - name: Install clang 20
         run: |
+          set -e
+          sudo mkdir -p /etc/apt/keyrings
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key \
+            | sudo gpg --dearmor --yes -o /etc/apt/keyrings/llvm.gpg
           . /etc/os-release
-          wget -qO /etc/apt/trusted.gpg.d/llvm.asc https://apt.llvm.org/llvm-snapshot.gpg.key
-          echo "deb http://apt.llvm.org/$VERSION_CODENAME/ llvm-toolchain-$VERSION_CODENAME-20 main" \
+          echo "deb [signed-by=/etc/apt/keyrings/llvm.gpg] http://apt.llvm.org/$VERSION_CODENAME/ llvm-toolchain-$VERSION_CODENAME-20 main" \
             | sudo tee /etc/apt/sources.list.d/llvm-20.list > /dev/null
           sudo apt-get update -qq
           sudo apt-get install -y -qq clang-20
+          clang-20 --version
 
       # Third-party sources and the host code generator: OSS, no game data, safe to cache. The key covers the
       # pinned ReXGlue commit in fetch_thirdparty.py and the SDK sources, so a bump rebuilds them.
       - name: Cache third-party sources and the host code generator
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             sdk/thirdparty
@@ -148,8 +153,15 @@ jobs:
       - name: Build the host code generator
         run: |
           if [ ! -x out/host/rexglue ]; then
+            CC=clang-20
+            CXX=clang++-20
+            if ! command -v "$CC" > /dev/null; then
+              echo "::warning::$CC is not installed, falling back to $(clang --version | head -1)"
+              CC=clang
+              CXX=clang++
+            fi
             cmake -S sdk -B out/host -G Ninja -DCMAKE_BUILD_TYPE=Release \
-                  -DCMAKE_C_COMPILER=clang-20 -DCMAKE_CXX_COMPILER=clang++-20
+                  -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX"
             cmake --build out/host --target rexglue -j "$(nproc)"
           fi
           out/host/rexglue --version || true
@@ -175,7 +187,7 @@ jobs:
           unzip -l "nfsmw-android-zh-arm64.apk" | grep -E 'lib/arm64-v8a/(libmain|libnx)' || true
           echo "size=$(stat -c %s nfsmw-android-zh-arm64.apk)" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: nfsmw-android-zh-arm64
           path: |

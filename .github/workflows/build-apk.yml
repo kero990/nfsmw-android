@@ -27,6 +27,19 @@ name: Build APK
 #                       built against (the same hash as GameEdition.SUPPORTED_SHA256, the one the APK checks
 #                       the disc against). Set it only when moving to another disc revision.
 #
+# Signing. Upstream signs release builds with the debug key (signingConfig signingConfigs.debug in
+# android/app/build.gradle), and a fresh runner has none, so AGP would generate a new one per run: every
+# APK would install, but none over the previous one. The keystore in the NFSMW_KEYSTORE_BASE64 secret is
+# the whole fix, and it has to be a debug keystore:
+#   keytool -genkeypair -keystore debug.keystore -storetype PKCS12 -storepass android -keypass android \
+#     -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
+#     -dname "CN=Android Debug,O=Android,C=US"
+#   base64 -w0 debug.keystore          # paste the result into the secret
+# The workflow puts it where AGP looks for its debug keystore (ANDROID_USER_HOME, see the keystore step)
+# and, whatever AGP signed with, the APK is checked against the keystore and re-signed with it if it has
+# to be, so the release always carries that one key. Compare the "keystore certificate sha256" line of
+# each run: it must stay the same, or upgrades stop working.
+#
 # Publishing a release needs Settings > Actions > General > Workflow permissions set to "Read and write
 # permissions": the workflow cannot grant itself more than the repository allows. Without it the build still
 # runs and uploads the APK as an artifact, and only the last step fails.
@@ -200,29 +213,41 @@ jobs:
           du -sh app_cht/generated/default app_cht/src/copias_literales
           df -h /
 
-      # Upstream signs release builds with the debug key (signingConfig signingConfigs.debug in
-      # android/app/build.gradle). A fresh runner has no such key, so it would be generated anew on every
-      # run: the APKs would be installable, but never over one another. Put a keystore in a
-      # NFSMW_KEYSTORE_BASE64 secret to keep one signature across releases. It has to be a debug keystore:
-      # alias androiddebugkey, store and key password "android", as AGP expects. Without the secret the
-      # step does nothing and the runner's own key is used.
+      # AGP looks for the debug keystore in <prefs>/debug.keystore, where <prefs> is ANDROID_USER_HOME when
+      # that variable is set (then ANDROID_PREFS_ROOT, then ANDROID_SDK_HOME, and only then $HOME/.android).
+      # Writing to $HOME/.android alone is not enough: AGP 8.7.3 ignored it and quietly generated a 30 year
+      # key of its own, which is how v0.6.0-zh.1 came out signed by a key nobody has. So the file is written
+      # to both places, a private copy is kept out of AGP's reach for the check below, and the build step
+      # sets ANDROID_USER_HOME to match.
       - name: Restore the signing keystore
         env:
           KEYSTORE_B64: ${{ secrets.NFSMW_KEYSTORE_BASE64 }}
+          USER_HOME_DIR: ${{ runner.temp }}/android-user-home
         run: |
+          set -e
           if [ -z "$KEYSTORE_B64" ]; then
-            echo "NFSMW_KEYSTORE_BASE64 is not set; the runner generates a key for this build"
+            echo "::warning::NFSMW_KEYSTORE_BASE64 is not set: this build gets a key of its own, and its APK cannot be installed over the previous one"
             exit 0
           fi
-          mkdir -p ~/.android
-          printf '%s' "$KEYSTORE_B64" | base64 -d > ~/.android/debug.keystore
-          chmod 600 ~/.android/debug.keystore
-          # The fingerprint is the thing to compare between releases: same alias plus the same SHA256 as the
-          # previous build's means upgrades keep working, a different one means they do not.
-          keytool -list -v -keystore ~/.android/debug.keystore -storepass android \
+          printf '%s' "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/nfsmw-debug.keystore"
+          chmod 600 "$RUNNER_TEMP/nfsmw-debug.keystore"
+          keytool -list -keystore "$RUNNER_TEMP/nfsmw-debug.keystore" -storepass android > /dev/null || {
+            echo "::error::the secret does not decode to a keystore with store password \"android\""
+            exit 1
+          }
+          mkdir -p "$USER_HOME_DIR" ~/.android
+          cp "$RUNNER_TEMP/nfsmw-debug.keystore" "$USER_HOME_DIR/debug.keystore"
+          cp "$RUNNER_TEMP/nfsmw-debug.keystore" ~/.android/debug.keystore
+          # Alias plus SHA256 are the thing to compare from release to release: the same pair means an
+          # upgrade installs over the previous build, a different one means it does not.
+          keytool -list -v -keystore "$RUNNER_TEMP/nfsmw-debug.keystore" -storepass android \
             | grep -E "^Alias name|SHA256:|Valid from"
 
       - name: Build the release APK
+        env:
+          # Where AGP looks first for its debug keystore: <ANDROID_USER_HOME>/debug.keystore, the same
+          # directory the keystore step filled in.
+          ANDROID_USER_HOME: ${{ runner.temp }}/android-user-home
         run: |
           df -h /
           cd android
@@ -235,12 +260,43 @@ jobs:
           APK=android/app/build/outputs/apk/release/app-release.apk
           [ -f "$APK" ] || { echo "::error::no APK at $APK"; exit 1; }
           cp "$APK" "nfsmw-android-zh-arm64.apk"
+          apksigner=$(ls "$ANDROID_SDK_ROOT"/build-tools/*/apksigner | sort -V | tail -1)
+          # Same digest as the keystore's certificate, or the release cannot be installed over the last
+          # one. apksigner prints the digest of the signer certificate, the same value keytool calls the
+          # SHA256 fingerprint, only without the colons.
+          digest() {
+            ("$apksigner" verify --print-certs "$1" || true) \
+              | sed -n 's/.*SHA-256 digest: //p' | head -1 | tr -d ':' | tr 'A-F' 'a-f'
+          }
+          KS="$RUNNER_TEMP/nfsmw-debug.keystore"
+          if [ -f "$KS" ]; then
+            want=$(keytool -list -v -keystore "$KS" -storepass android \
+                     | sed -n 's/^[[:space:]]*SHA256: //p' | tr -d ':' | tr 'A-F' 'a-f')
+            alias_name=$(keytool -list -v -keystore "$KS" -storepass android \
+                          | sed -n 's/^Alias name: //p' | head -1)
+            echo "keystore certificate sha256: $want"
+            echo "keystore key alias:          $alias_name"
+            got=$(digest "nfsmw-android-zh-arm64.apk")
+            echo "APK signed with:             $got"
+            if [ "$got" != "$want" ]; then
+              echo "::warning::AGP did not use the keystore from the secret; re-signing the APK with it"
+              "$apksigner" sign --ks "$KS" --ks-pass pass:android --key-pass pass:android \
+                --ks-key-alias "$alias_name" \
+                --v1-signing-enabled false --v2-signing-enabled true --v3-signing-enabled false \
+                --out resigned.apk "nfsmw-android-zh-arm64.apk"
+              mv resigned.apk "nfsmw-android-zh-arm64.apk"
+              got=$(digest "nfsmw-android-zh-arm64.apk")
+            fi
+            if [ "$got" != "$want" ]; then
+              echo "::error::the APK is signed with $got, the keystore has $want"
+              exit 1
+            fi
+            echo "signed with the key from NFSMW_KEYSTORE_BASE64, as expected"
+          else
+            echo "::warning::no NFSMW_KEYSTORE_BASE64 secret: the APK keeps the key this runner generated"
+          fi
           sha256sum "nfsmw-android-zh-arm64.apk" | tee SHA256SUMS.txt
           unzip -l "nfsmw-android-zh-arm64.apk" | grep -E 'lib/arm64-v8a/(libmain|libnx)'
-          # The release is signed with the debug key (android/app/build.gradle). Verify it and print the
-          # signer's fingerprint: with no NFSMW_KEYSTORE_BASE64 secret this changes from run to run, and the
-          # digest is the quickest way to see when it did.
-          apksigner=$(ls "$ANDROID_SDK_ROOT"/build-tools/*/apksigner | sort -V | tail -1)
           "$apksigner" verify --print-certs "nfsmw-android-zh-arm64.apk"
           echo "size=$(stat -c %s nfsmw-android-zh-arm64.apk)" >> "$GITHUB_OUTPUT"
 

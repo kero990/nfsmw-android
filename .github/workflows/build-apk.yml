@@ -61,6 +61,10 @@ jobs:
     env:
       NDK_VERSION: 28.2.13676358
       CMAKE_VERSION: 3.30.5
+      # -B out/host is only the build tree: the SDK points CMAKE_RUNTIME_OUTPUT_DIRECTORY at
+      # sdk/out/<platform>, which is sdk/out/linux-amd64 on a runner. The path in docs/building.md
+      # (out/host/rexglue) is stale.
+      REXGLUE: ${{ github.workspace }}/sdk/out/linux-amd64/rexglue
     steps:
       - uses: actions/checkout@v7
 
@@ -145,6 +149,7 @@ jobs:
           path: |
             sdk/thirdparty
             out/host
+            sdk/out/linux-amd64
           key: host-${{ runner.os }}-${{ hashFiles('tools/fetch_thirdparty.py') }}-${{ hashFiles('sdk/CMakeLists.txt', 'sdk/src/**', 'sdk/include/**') }}
 
       - name: Get the missing libraries
@@ -160,7 +165,7 @@ jobs:
 
       - name: Build the host code generator
         run: |
-          if [ ! -x out/host/rexglue ]; then
+          if [ ! -x "$REXGLUE" ]; then
             CC=clang-20
             CXX=clang++-20
             if ! command -v "$CC" > /dev/null; then
@@ -182,12 +187,15 @@ jobs:
                   -DSDL_X11=OFF -DSDL_WAYLAND=OFF
             cmake --build out/host --target rexglue -j "$(nproc)"
           fi
-          out/host/rexglue --version || true
+          ls -l "$REXGLUE"
+          "$REXGLUE" --version
 
       - name: Generate the Asia tree's code
         run: |
-          REXGLUE="$PWD/out/host/rexglue" PYTHON=python3 \
+          REXGLUE="$REXGLUE" PYTHON=python3 \
             bash tools/codegen.sh app_cht app_cht/enganchadas.txt app_cht/tabla.tsv
+          du -sh app_cht/generated/default app_cht/src/copias_literales
+          df -h /
 
       # Upstream signs release builds with the debug key (signingConfig signingConfigs.debug in
       # android/app/build.gradle). A fresh runner has no such key, so it would be generated anew on every

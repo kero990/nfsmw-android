@@ -171,8 +171,14 @@ jobs:
             # SDL's windowing backends are off on purpose: installing the Wayland headers above would
             # otherwise turn SDL_WAYLAND on, and that needs wayland-scanner and wayland-protocols. The
             # code generator needs neither.
+            #
+            # -msse4.1 is what rexglue_apply_target_settings() adds to host targets on x86_64: memory.cpp
+            # uses _mm_shuffle_epi8 (SSSE3) with no target attribute, which clang refuses to inline in a
+            # translation unit built without the feature. The SDK's own object libraries never call that
+            # helper, so pass it here.
             cmake -S sdk -B out/host -G Ninja -DCMAKE_BUILD_TYPE=Release \
                   -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" \
+                  -DCMAKE_C_FLAGS=-msse4.1 -DCMAKE_CXX_FLAGS=-msse4.1 \
                   -DSDL_X11=OFF -DSDL_WAYLAND=OFF
             cmake --build out/host --target rexglue -j "$(nproc)"
           fi

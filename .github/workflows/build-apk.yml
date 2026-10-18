@@ -8,9 +8,9 @@ name: Build APK
 #     configure until the code generated from default.xex exists. Those trees (app/generated, app_cht/generated
 #     and the two src/copias_literales/) are not committed, on purpose: they are translated from the game.
 #   * The APK is built from app_cht, the Asia (traditional Chinese) edition tree, which this fork does commit as
-#     source. So the only thing the workflow needs from outside is the Asia executable, apps/game_root/default_cn.xex.
-#     The PAL default.xex is NOT needed here: it is only used to rebuild app_cht/src from app/ with
-#     tools/editions/crear_arbol.py, a maintenance step done by hand (see below).
+#     source. So the only thing the workflow needs from outside is the Asia executable,
+#     assets/game_root/default_cn.xex. The PAL default.xex is NOT needed here: it is only used to rebuild
+#     app_cht/src from app/ with tools/editions/crear_arbol.py, a maintenance step done by hand (see below).
 #   * The two code generators tools/codegen.sh runs are pure OSS: fetch_thirdparty.py downloads the ReXGlue SDK
 #     sources, the host rexglue is built from sdk/ with clang, and the two Python steps rewrite calls in the
 #     generated C++. They are cached between runs; nothing derived from the game is.
@@ -27,9 +27,9 @@ name: Build APK
 #                       built against (the same hash as GameEdition.SUPPORTED_SHA256, the one the APK checks
 #                       the disc against). Set it only when moving to another disc revision.
 #
-# The PAL default.xex is not fetched: app_cht/ is committed, so crear_arbol.py never runs here. See the
-# maintenance note below for when it is needed.
-# Nothing from the game is stored anywhere on GitHub: it is downloaded, used and thrown away with the runner.
+# Publishing a release needs Settings > Actions > General > Workflow permissions set to "Read and write
+# permissions": the workflow cannot grant itself more than the repository allows. Without it the build still
+# runs and uploads the APK as an artifact, and only the last step fails.
 #
 # Maintenance: when app/src changes upstream, rebuild app_cht/src locally with
 #   REXGLUE=out/host/rexglue PYTHON=python3 bash tools/codegen.sh app
@@ -63,6 +63,43 @@ jobs:
       CMAKE_VERSION: 3.30.5
     steps:
       - uses: actions/checkout@v4
+
+      # First, before anything expensive: the one file that has to come from the game, and the one step that
+      # can fail because of a mistyped secret in seconds instead of an hour into the build. It is read while
+      # the tree is generated, never while the APK is built: app_cht/CMakeLists.txt takes game_root from
+      # beside the executable at run time.
+      - name: Get the Asia executable (WebDAV)
+        env:
+          BASE: ${{ secrets.NFSMW_XEX_BASEURL }}
+          FILE: ${{ vars.NFSMW_XEX_FILE || 'default_cn.xex' }}
+          WANT: ${{ vars.NFSMW_XEX_SHA256 || '0cd7b9fa3957de085e298c91faa726116ad0079abaefead82c2f3337ee432e64' }}
+          WEBDAV_USER: ${{ secrets.NFSMW_WEBDAV_USER }}
+          WEBDAV_PASS: ${{ secrets.NFSMW_WEBDAV_PASS }}
+        run: |
+          set -e
+          if [ -z "$BASE" ]; then
+            echo "::error::set the NFSMW_XEX_BASEURL secret (base URL serving the Asia executable)"
+            exit 1
+          fi
+          mkdir -p assets/game_root
+          auth=()
+          [ -n "$WEBDAV_USER" ] && auth=(--user "$WEBDAV_USER:$WEBDAV_PASS")
+          curl -fSL --retry 3 "${auth[@]}" -o assets/game_root/default_cn.xex "$BASE/$FILE"
+          ls -l assets/game_root/default_cn.xex
+
+          # Catch a wrong edition, a truncated download or an HTML page where the file should be, before the
+          # hour-long build rather than inside it: a codegen run on the wrong executable produces a tree that
+          # does not match GameEdition.SUPPORTED_SHA256 and would either fail late or ship a broken APK.
+          [ "$(head -c 4 assets/game_root/default_cn.xex)" = "XEX2" ] || {
+            echo "::error::$BASE/$FILE is not an Xbox 360 executable (no XEX2 header)"
+            exit 1
+          }
+          got=$(sha256sum assets/game_root/default_cn.xex | cut -d' ' -f1)
+          if [ "$got" != "$WANT" ]; then
+            echo "::error::default_cn.xex sha256 $got, expected $WANT"
+            exit 1
+          fi
+          echo "default_cn.xex: $got, as expected"
 
       # The generated code plus the object files need a few GB; the stock image keeps the NDK and several
       # tool caches we do not use.
@@ -116,41 +153,6 @@ jobs:
             cmake --build out/host --target rexglue -j "$(nproc)"
           fi
           out/host/rexglue --version || true
-
-      # The one file that has to come from the game. It is read while the tree is generated, never while the
-      # APK is built: app_cht/CMakeLists.txt takes game_root from beside the executable at run time.
-      - name: Get the Asia executable (WebDAV)
-        env:
-          BASE: ${{ secrets.NFSMW_XEX_BASEURL }}
-          FILE: ${{ vars.NFSMW_XEX_FILE || 'default_cn.xex' }}
-          WANT: ${{ vars.NFSMW_XEX_SHA256 || '0cd7b9fa3957de085e298c91faa726116ad0079abaefead82c2f3337ee432e64' }}
-          WEBDAV_USER: ${{ secrets.NFSMW_WEBDAV_USER }}
-          WEBDAV_PASS: ${{ secrets.NFSMW_WEBDAV_PASS }}
-        run: |
-          set -e
-          if [ -z "$BASE" ]; then
-            echo "::error::set the NFSMW_XEX_BASEURL secret (base URL serving the Asia executable)"
-            exit 1
-          fi
-          mkdir -p assets/game_root
-          auth=()
-          [ -n "$WEBDAV_USER" ] && auth=(--user "$WEBDAV_USER:$WEBDAV_PASS")
-          curl -fSL --retry 3 "${auth[@]}" -o assets/game_root/default_cn.xex "$BASE/$FILE"
-          ls -l assets/game_root/default_cn.xex
-
-          # Catch a wrong edition, a truncated download or an HTML page where the file should be, before the
-          # hour-long build rather than inside it: a codegen run on the wrong executable produces a tree that
-          # does not match GameEdition.SUPPORTED_SHA256 and would either fail late or ship a broken APK.
-          [ "$(head -c 4 assets/game_root/default_cn.xex)" = "XEX2" ] || {
-            echo "::error::$BASE/$FILE is not an Xbox 360 executable (no XEX2 header)"
-            exit 1
-          }
-          got=$(sha256sum assets/game_root/default_cn.xex | cut -d' ' -f1)
-          if [ "$got" != "$WANT" ]; then
-            echo "::error::default_cn.xex sha256 $got, expected $WANT"
-            exit 1
-          fi
-          echo "default_cn.xex: $got, as expected"
 
       - name: Generate the Asia tree's code
         run: |

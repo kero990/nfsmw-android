@@ -217,7 +217,10 @@ jobs:
           mkdir -p ~/.android
           printf '%s' "$KEYSTORE_B64" | base64 -d > ~/.android/debug.keystore
           chmod 600 ~/.android/debug.keystore
-          keytool -list -keystore ~/.android/debug.keystore -storepass android | tail -2
+          # The fingerprint is the thing to compare between releases: same alias plus the same SHA256 as the
+          # previous build's means upgrades keep working, a different one means they do not.
+          keytool -list -v -keystore ~/.android/debug.keystore -storepass android \
+            | grep -E "^Alias name|SHA256:|Valid from"
 
       - name: Build the release APK
         run: |

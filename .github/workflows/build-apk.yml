@@ -150,6 +150,14 @@ jobs:
       - name: Get the missing libraries
         run: python3 tools/fetch_thirdparty.py
 
+      # sdk/src/ui/CMakeLists.txt asks pkg-config for x11-xcb and wayland-client in every Linux build
+      # that is not Android, and the image has neither header. Headers are all that is wanted: the code
+      # generator opens no window, so SDL stays configured as it was (X11 and Wayland off, see below).
+      - name: Install the host tool's X11 and Wayland headers
+        run: |
+          sudo apt-get install -y -qq libx11-xcb-dev libwayland-dev
+          pkg-config --modversion x11-xcb wayland-client
+
       - name: Build the host code generator
         run: |
           if [ ! -x out/host/rexglue ]; then
@@ -160,8 +168,12 @@ jobs:
               CC=clang
               CXX=clang++
             fi
+            # SDL's windowing backends are off on purpose: installing the Wayland headers above would
+            # otherwise turn SDL_WAYLAND on, and that needs wayland-scanner and wayland-protocols. The
+            # code generator needs neither.
             cmake -S sdk -B out/host -G Ninja -DCMAKE_BUILD_TYPE=Release \
-                  -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX"
+                  -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" \
+                  -DSDL_X11=OFF -DSDL_WAYLAND=OFF
             cmake --build out/host --target rexglue -j "$(nproc)"
           fi
           out/host/rexglue --version || true
@@ -171,8 +183,28 @@ jobs:
           REXGLUE="$PWD/out/host/rexglue" PYTHON=python3 \
             bash tools/codegen.sh app_cht app_cht/enganchadas.txt app_cht/tabla.tsv
 
+      # Upstream signs release builds with the debug key (signingConfig signingConfigs.debug in
+      # android/app/build.gradle). A fresh runner has no such key, so it would be generated anew on every
+      # run: the APKs would be installable, but never over one another. Put a keystore in a
+      # NFSMW_KEYSTORE_BASE64 secret to keep one signature across releases. It has to be a debug keystore:
+      # alias androiddebugkey, store and key password "android", as AGP expects. Without the secret the
+      # step does nothing and the runner's own key is used.
+      - name: Restore the signing keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.NFSMW_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "NFSMW_KEYSTORE_BASE64 is not set; the runner generates a key for this build"
+            exit 0
+          fi
+          mkdir -p ~/.android
+          printf '%s' "$KEYSTORE_B64" | base64 -d > ~/.android/debug.keystore
+          chmod 600 ~/.android/debug.keystore
+          keytool -list -keystore ~/.android/debug.keystore -storepass android | tail -2
+
       - name: Build the release APK
         run: |
+          df -h /
           cd android
           ./gradlew --no-daemon --stacktrace assembleRelease
 

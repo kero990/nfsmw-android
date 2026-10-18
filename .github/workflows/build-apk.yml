@@ -16,9 +16,13 @@ name: Build APK
 #     generated C++. They are cached between runs; nothing derived from the game is.
 #
 # The executable comes from WebDAV, through repository secrets:
-#   NFSMW_XEX_BASEURL   base URL, the file is fetched from <base>/default_cn.xex
+#   NFSMW_XEX_BASEURL   base URL, the file is fetched from <base>/<NFSMW_XEX_FILE>
 #   NFSMW_WEBDAV_USER   optional, HTTP basic auth user
 #   NFSMW_WEBDAV_PASS   optional, HTTP basic auth password
+# and one optional repository variable (Settings > Variables):
+#   NFSMW_XEX_FILE      name of the file on the server, default_cn.xex when unset. Whatever it is called
+#                       there, it lands here as assets/game_root/default_cn.xex, the name
+#                       app_cht/nfsmw_manifest.toml asks for.
 # Nothing from the game is stored anywhere on GitHub: it is downloaded, used and thrown away with the runner.
 #
 # Maintenance: when app/src changes upstream, rebuild app_cht/src locally with
@@ -112,18 +116,19 @@ jobs:
       - name: Get the Asia executable (WebDAV)
         env:
           BASE: ${{ secrets.NFSMW_XEX_BASEURL }}
+          FILE: ${{ vars.NFSMW_XEX_FILE || 'default_cn.xex' }}
           WEBDAV_USER: ${{ secrets.NFSMW_WEBDAV_USER }}
           WEBDAV_PASS: ${{ secrets.NFSMW_WEBDAV_PASS }}
         run: |
           set -e
           if [ -z "$BASE" ]; then
-            echo "::error::set the NFSMW_XEX_BASEURL secret (base URL serving default_cn.xex)"
+            echo "::error::set the NFSMW_XEX_BASEURL secret (base URL serving the Asia executable)"
             exit 1
           fi
           mkdir -p assets/game_root
           auth=()
           [ -n "$WEBDAV_USER" ] && auth=(--user "$WEBDAV_USER:$WEBDAV_PASS")
-          curl -fSL --retry 3 "${auth[@]}" -o assets/game_root/default_cn.xex "$BASE/default_cn.xex"
+          curl -fSL --retry 3 "${auth[@]}" -o assets/game_root/default_cn.xex "$BASE/$FILE"
           ls -l assets/game_root/default_cn.xex
 
       - name: Generate the Asia tree's code

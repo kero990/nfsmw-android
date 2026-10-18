@@ -19,10 +19,16 @@ name: Build APK
 #   NFSMW_XEX_BASEURL   base URL, the file is fetched from <base>/<NFSMW_XEX_FILE>
 #   NFSMW_WEBDAV_USER   optional, HTTP basic auth user
 #   NFSMW_WEBDAV_PASS   optional, HTTP basic auth password
-# and one optional repository variable (Settings > Variables):
+# and two optional repository variables (Settings > Variables):
 #   NFSMW_XEX_FILE      name of the file on the server, default_cn.xex when unset. Whatever it is called
 #                       there, it lands here as assets/game_root/default_cn.xex, the name
 #                       app_cht/nfsmw_manifest.toml asks for.
+#   NFSMW_XEX_SHA256    expected sha256 of that file, defaulting to the Asia executable this port's table was
+#                       built against (the same hash as GameEdition.SUPPORTED_SHA256, the one the APK checks
+#                       the disc against). Set it only when moving to another disc revision.
+#
+# The PAL default.xex is not fetched: app_cht/ is committed, so crear_arbol.py never runs here. See the
+# maintenance note below for when it is needed.
 # Nothing from the game is stored anywhere on GitHub: it is downloaded, used and thrown away with the runner.
 #
 # Maintenance: when app/src changes upstream, rebuild app_cht/src locally with
@@ -117,6 +123,7 @@ jobs:
         env:
           BASE: ${{ secrets.NFSMW_XEX_BASEURL }}
           FILE: ${{ vars.NFSMW_XEX_FILE || 'default_cn.xex' }}
+          WANT: ${{ vars.NFSMW_XEX_SHA256 || '0cd7b9fa3957de085e298c91faa726116ad0079abaefead82c2f3337ee432e64' }}
           WEBDAV_USER: ${{ secrets.NFSMW_WEBDAV_USER }}
           WEBDAV_PASS: ${{ secrets.NFSMW_WEBDAV_PASS }}
         run: |
@@ -130,6 +137,20 @@ jobs:
           [ -n "$WEBDAV_USER" ] && auth=(--user "$WEBDAV_USER:$WEBDAV_PASS")
           curl -fSL --retry 3 "${auth[@]}" -o assets/game_root/default_cn.xex "$BASE/$FILE"
           ls -l assets/game_root/default_cn.xex
+
+          # Catch a wrong edition, a truncated download or an HTML page where the file should be, before the
+          # hour-long build rather than inside it: a codegen run on the wrong executable produces a tree that
+          # does not match GameEdition.SUPPORTED_SHA256 and would either fail late or ship a broken APK.
+          [ "$(head -c 4 assets/game_root/default_cn.xex)" = "XEX2" ] || {
+            echo "::error::$BASE/$FILE is not an Xbox 360 executable (no XEX2 header)"
+            exit 1
+          }
+          got=$(sha256sum assets/game_root/default_cn.xex | cut -d' ' -f1)
+          if [ "$got" != "$WANT" ]; then
+            echo "::error::default_cn.xex sha256 $got, expected $WANT"
+            exit 1
+          fi
+          echo "default_cn.xex: $got, as expected"
 
       - name: Generate the Asia tree's code
         run: |

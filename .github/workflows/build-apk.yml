@@ -31,6 +31,9 @@ name: Build APK
 # permissions": the workflow cannot grant itself more than the repository allows. Without it the build still
 # runs and uploads the APK as an artifact, and only the last step fails.
 #
+# To cut a release: push a tag (git tag v0.6.0-zh.2 && git push fork v0.6.0-zh.2). To build without
+# publishing, run the workflow by hand from the Actions tab: it then only uploads the artifact.
+#
 # Maintenance: when app/src changes upstream, rebuild app_cht/src locally with
 #   REXGLUE=out/host/rexglue PYTHON=python3 bash tools/codegen.sh app
 #   python3 tools/editions/crear_arbol.py cht tools/editions/asia/tabla.tsv \
@@ -230,7 +233,12 @@ jobs:
           [ -f "$APK" ] || { echo "::error::no APK at $APK"; exit 1; }
           cp "$APK" "nfsmw-android-zh-arm64.apk"
           sha256sum "nfsmw-android-zh-arm64.apk" | tee SHA256SUMS.txt
-          unzip -l "nfsmw-android-zh-arm64.apk" | grep -E 'lib/arm64-v8a/(libmain|libnx)' || true
+          unzip -l "nfsmw-android-zh-arm64.apk" | grep -E 'lib/arm64-v8a/(libmain|libnx)'
+          # The release is signed with the debug key (android/app/build.gradle). Verify it and print the
+          # signer's fingerprint: with no NFSMW_KEYSTORE_BASE64 secret this changes from run to run, and the
+          # digest is the quickest way to see when it did.
+          apksigner=$(ls "$ANDROID_SDK_ROOT"/build-tools/*/apksigner | sort -V | tail -1)
+          "$apksigner" verify --print-certs "nfsmw-android-zh-arm64.apk"
           echo "size=$(stat -c %s nfsmw-android-zh-arm64.apk)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@v7

@@ -6,9 +6,15 @@
 
 APK nativo · Vulkan 1.1+ · controles táctiles · generación local de shaders
 
-[Descargar la última versión](https://github.com/codepdbh/nfsmw-android/releases/latest) · [English](README.md)
+[Descargar la última versión](https://github.com/kero990/nfsmw-android/releases/latest) · [English](README.md)
 
 </div>
+
+## Sobre este repositorio
+
+Este repositorio es un fork del [repositorio Android original](https://github.com/codepdbh/nfsmw-android). Solo cambia dos cosas: el APK usa la edición **NTSC Asia (chino tradicional)** —no la PAL España—, con la misma huella del ejecutable y el mismo mapa de direcciones que la línea china del repositorio [nfsmw-nx](https://github.com/StevensND/nfsmw-nx), y la interfaz del launcher se puede poner en chino (u otros siete idiomas) porque se ha fusionado el PR [#1762](https://github.com/codepdbh/nfsmw-android/pull/1762), que el proyecto original no llegó a fusionar. Los controles, el rendimiento y lo demás son idénticos al original.
+
+Aquí abajo queda el texto original del proyecto (en español, traducido del README inglés); sigue siendo válido salvo por la edición del juego y el idioma de la interfaz.
 
 Este proyecto adapta a Android el trabajo de recompilación de [nfsmw-nx](https://github.com/StevensND/nfsmw-nx) y el SDK [ReXGlue](https://github.com/rexglue/rexglue-sdk). La aplicación usa código C++ recompilado, SDL3 y el renderizador nativo sobre Vulkan. No emula una Xbox 360 ni incluye los archivos del juego.
 
@@ -25,7 +31,7 @@ Probado en un **Samsung Galaxy S25 Ultra** (Adreno 830), un **Galaxy A55** (Xcli
 
 ## Instalación y primer inicio
 
-1. Descarga el APK de la última versión en [Releases](https://github.com/codepdbh/nfsmw-android/releases/latest) y ábrelo en el teléfono. Si Android lo solicita, permite **Instalar aplicaciones desconocidas** al navegador o al gestor de archivos.
+1. Descarga el APK de la última versión en [Releases](https://github.com/kero990/nfsmw-android/releases/latest) y ábrelo en el teléfono. Si Android lo solicita, permite **Instalar aplicaciones desconocidas** al navegador o al gestor de archivos.
 2. Instala el APK y abre **Need for Speed Most Wanted**. Autoriza el acceso a archivos que solicita la app; en Android 11 o posterior aparece el ajuste de **acceso a todos los archivos**. Después vuelve al launcher.
 3. Copia `default.xex`, `NFS/` y `Movies/` directamente dentro de `Memoria interna/nsfmw-androidevolved/`. También puedes pulsar **Elegir carpeta del juego** y seleccionar la carpeta extraída; la app la copia a ese destino.
 4. Comprueba que el launcher marque los archivos como disponibles y pulsa **Jugar**. La primera vez genera `nfsmw_shaders.nfsp` a partir de tu copia y muestra el avance: desde unos segundos hasta un par de minutos en teléfonos modestos.
